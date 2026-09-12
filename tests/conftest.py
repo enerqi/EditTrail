@@ -15,6 +15,8 @@ behaviour to exercise its logic:
   buffer and fire on_reload / on_revert. FakeView.close() fires on_pre_close first, as Sublime does.
 * FakeWindow.open_file() only records what was requested; tests create the reopened view and call
   on_load themselves, which is how Sublime sequences a real reopen.
+* sublime.set_timeout() queues the callback instead of running it. run_timeouts() drains the queue,
+  standing in for the editor going idle, so a test decides when the debounced anchor refresh happens.
 
 The fake modules are registered in sys.modules at import time, before any test imports edit_trail.
 """
@@ -280,6 +282,14 @@ class _WindowCommand:
 
 status_messages: list[str] = []
 plugin_settings: FakeSettings = FakeSettings()
+timeouts: list[Callable[[], None]] = []
+
+
+def run_timeouts() -> None:
+    """Run everything queued with sublime.set_timeout, as the editor does when it goes idle."""
+    while timeouts:
+        timeouts.pop(0)()
+
 
 _sublime = types.ModuleType("sublime")
 _sublime.Region = FakeRegion  # ty: ignore[unresolved-attribute]
@@ -287,6 +297,7 @@ _sublime.HIDDEN = 256  # ty: ignore[unresolved-attribute]
 _sublime.ENCODED_POSITION = 1  # ty: ignore[unresolved-attribute]
 _sublime.status_message = status_messages.append  # ty: ignore[unresolved-attribute]
 _sublime.load_settings = lambda _name: plugin_settings  # ty: ignore[unresolved-attribute]
+_sublime.set_timeout = lambda callback, _delay=0: timeouts.append(callback)  # ty: ignore[unresolved-attribute]
 _sublime_plugin = types.ModuleType("sublime_plugin")
 _sublime_plugin.EventListener = _EventListener  # ty: ignore[unresolved-attribute]
 _sublime_plugin.WindowCommand = _WindowCommand  # ty: ignore[unresolved-attribute]
@@ -308,6 +319,7 @@ def fresh_plugin() -> Iterator[None]:
     plugin_settings.values.clear()
     plugin_settings.callbacks.clear()
     status_messages.clear()
+    timeouts.clear()
     edit_trail.plugin_loaded()
     yield
     edit_trail.plugin_unloaded()

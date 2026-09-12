@@ -7,6 +7,11 @@
 	// Edits within this many lines of the newest location, in the same file,
 	// update that location instead of adding a new one. 0 merges only edits on
 	// the same line.
+	//
+	// It is also how close counts as "already here" when going back and
+	// forward: locations within this many lines of the cursor are skipped, so
+	// raising it to record fewer locations also makes each keypress jump
+	// further.
 	"merge_line_distance": 5,
 
 	// Print each recorded or ignored modification to the console

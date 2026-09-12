@@ -26,6 +26,8 @@ back to them. History is per window and resets when Sublime restarts.
 
 - `max_entries` (50): edit locations kept per window.
 - `merge_line_distance` (5): edits this close to the newest location, in the same file, update it.
+  The same distance is what counts as "already here" when navigating, so locations within it of the
+  cursor are skipped.
 
 ## Development
 

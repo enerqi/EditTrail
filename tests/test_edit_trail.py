@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import edit_trail
-from tests.conftest import BODY, FakeView, FakeWindow, plugin_settings, status_messages
+from tests.conftest import BODY, FakeView, FakeWindow, plugin_settings, run_timeouts, status_messages
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -32,7 +32,8 @@ def _files(tmp_path: Path, *names: str) -> list[str]:
 def _rows(history: edit_trail.History) -> list[tuple[str | None, int]]:
     """(file name, current row) per entry, for readable assertions.
 
-    An attached entry has no file_name of its own: it is read from the view on detach.
+    An attached entry is reported from its live region; a detached one from the path and row it
+    remembered.
     """
     result: list[tuple[str | None, int]] = []
     for entry in history.entries:
@@ -92,6 +93,20 @@ def test_scratch_and_panel_views_are_ignored(window: FakeWindow) -> None:
 def test_widget_views_are_ignored(window: FakeWindow) -> None:
     FakeView(window, None, "", widget=True).type(0, "find what")
     assert window.id() not in edit_trail._State.histories
+
+
+def test_panel_and_widget_views_are_not_cached(window: FakeWindow) -> None:
+    """Sublime reports no reliable close for them, so caching a "no" would leak one id each."""
+    panel = FakeView(window, None, "", element="find:input")
+    widget = FakeView(window, None, "", widget=True)
+    for _ in range(3):
+        panel.type(0, "x")
+        widget.type(0, "y")
+    assert edit_trail._State.trackable == set()
+
+    editor = FakeView(window, None, BODY)
+    editor.type_at_row(10, "z")
+    assert edit_trail._State.trackable == {editor.id()}
 
 
 def test_a_view_turned_scratch_after_an_edit_stops_being_recorded(window: FakeWindow, tmp_path: Path) -> None:
@@ -339,10 +354,37 @@ def test_reload_refreshes_the_fallback_row_from_a_surviving_region(window: FakeW
     a.type_at_row(50, "x")
     a.type_at_row(0, "new\nnew\n")  # the first entry's region slides down to row 52
     entry = _history(window).entries[0]
-    assert entry.row == 50  # not refreshed since the entry was created
+    assert entry.row == 50  # the idle refresh has not run yet
 
     a.reload_from_disk(a.buf.text)
     assert entry.row == 52
+
+
+def test_idle_refresh_moves_the_fallback_row_with_the_region(window: FakeWindow, tmp_path: Path) -> None:
+    (fa,) = _files(tmp_path, "a.txt")
+    a = FakeView(window, fa, BODY)
+    a.type_at_row(50, "x")
+    a.type_at_row(0, "new\n" * 100)  # far away: its own entry, and the first one slides to row 150
+    entry = _history(window).entries[0]
+    assert entry.row == 50
+
+    run_timeouts()  # the editor goes idle
+    assert entry.row == 150
+
+
+def test_a_dropped_region_reanchors_where_the_edit_ended_up(window: FakeWindow, tmp_path: Path) -> None:
+    """Without the idle refresh this lands on row 50, where the entry was first typed."""
+    (fa,) = _files(tmp_path, "a.txt")
+    a = FakeView(window, fa, BODY)
+    a.type_at_row(50, "x")
+    a.type_at_row(0, "new\n" * 100)
+    entry = _history(window).entries[0]
+    run_timeouts()
+
+    a.reload_from_disk(a.buf.text, keep_regions=False)
+    point = entry.point()
+    assert point is not None
+    assert a.rowcol(point)[0] == 150
 
 
 @pytest.mark.skipif(not CASE_INSENSITIVE_PATHS, reason="paths are case-sensitive on this platform")
@@ -385,6 +427,23 @@ def test_unsaved_buffer_entries_move_to_clone_then_drop(window: FakeWindow) -> N
 
     clone.close()
     assert history.entries == []
+
+
+def test_entry_is_reopenable_when_its_view_dies_without_on_pre_close(window: FakeWindow, tmp_path: Path) -> None:
+    """Sublime does not reliably send on_pre_close when a whole window goes."""
+    (fa,) = _files(tmp_path, "a.txt")
+    a = FakeView(window, fa, BODY)
+    a.type_at_row(10, "x")
+    entry = _history(window).entries[0]
+
+    window._views.remove(a)  # the tab was dragged to another window, which then closed
+    a.valid = False
+    assert entry.live_view() is None
+    assert entry.is_reachable()
+
+    FakeView(window, None, BODY).type_at_row(0, "elsewhere")
+    edit_trail._navigate(window, -1)
+    assert window.opened == [f"{fa}:11:2"]
 
 
 def test_buffer_saved_after_edit_is_reopenable(window: FakeWindow, tmp_path: Path) -> None:
@@ -450,6 +509,24 @@ def test_unsaved_buffer_entries_do_not_move_to_a_clone_in_another_window(window:
     original.close()
     history = _history(window)
     assert history.entries == []
+
+
+def test_entries_are_not_handed_a_clone_in_the_window_the_tab_moved_to(window: FakeWindow, tmp_path: Path) -> None:
+    other = FakeWindow()
+    (fa,) = _files(tmp_path, "a.txt")
+    a = FakeView(window, fa, BODY)
+    a.type_at_row(10, "x")
+    entry = _history(window).entries[0]
+
+    window._views.remove(a)  # the tab is dragged to the other window
+    a.win = other
+    other._views.append(a)
+    clone = FakeView(other, fa, buffer=a.buf)
+    a.close()
+
+    assert entry.view is None  # detached, not moved to a clone this window cannot focus
+    assert entry.file_name == fa
+    assert clone.get_regions(entry.key) == []
 
 
 def test_window_close_forgets_history_and_erases_regions(
