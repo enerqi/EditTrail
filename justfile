@@ -81,6 +81,16 @@ test *args:
 test-py38 *args:
     uv run --no-project -p 3.8 --with "pytest>=8.3,<8.4" python -m pytest -p no:cacheprovider -o pythonpath=. tests {{args}}
 
+# Zero-setup debugging, no Sublime Debugger package needed: `--trace` drops into pdb at the first line of
+# every test matching `pattern` (n = next, s = step into, c = continue, q = quit). Run it in a terminal
+# such as Terminus. For the graphical debugger instead, open EditTrail.sublime-project and use its
+# debugger_configurations.
+# ---
+# Debug tests matching a pattern in pdb, e.g. `just debug-test collapsed`.
+[group('qa')]
+debug-test pattern:
+    uv run pytest -k "{{pattern}}" --trace -p no:cacheprovider
+
 # Full local gate: lint + format check + typecheck + tests on the dev Python and on 3.8.
 [group('qa')]
 qa: lint (format "--check") typecheck test test-py38

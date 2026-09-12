@@ -28,7 +28,8 @@ Settings (``EditTrail.sublime-settings``)
     locations also widens the band around the cursor that ``edit_trail_back``
     and ``edit_trail_forward`` step over.
 ``debug``
-    Print each recorded or ignored modification to the console. Default false.
+    Print each modification to the console, saying whether it added a location,
+    merged into the newest one, or was ignored. Default false.
 
 Settings are read once at load and re-read when the settings file changes, so
 the keystroke hot path never touches the settings API.
@@ -56,6 +57,12 @@ How recording works
   not loading, has unsaved changes, and is the window's active view. The cost:
   undoing back to the saved state, and edits a plugin makes in other files,
   leave no entry.
+* The one non-edit those guards cannot reject is hot exit restoring a buffer
+  that had unsaved changes: it is not loading, it is dirty afterwards, and one
+  of the restored views is active, so it looks exactly like typing and no API
+  tells the two apart. It can leave one entry per window at startup, at the
+  cursor position the buffer was restored with, which is where the user left
+  off. Preferable to a heuristic that could silently drop a real first edit.
 
 How positions stay correct
 --------------------------
@@ -76,9 +83,10 @@ How positions stay correct
   of file, so entries re-anchor then, falling back to the remembered
   row/column (:func:`_reanchor`).
 * That fallback row/column is only useful if it is current, and the region
-  moves under it as the text around it changes. So when typing pauses, every
-  entry copies its region's position back into its row/column
-  (:func:`_refresh_anchors`). Off the keystroke path, once per burst.
+  moves under it as the text around it changes. So an entry on a buffer that
+  was modified copies its region's position back into its row/column
+  (:func:`_refresh_anchors`), off the keystroke path and at most once every
+  ``ANCHOR_REFRESH_DELAY_MS`` while editing continues.
 
 Windows
 -------
@@ -99,6 +107,10 @@ Navigation semantics
   ``len(entries)`` when not navigating ("at the head").
 * A new edit resets the index to the head. Nothing is truncated, so going back
   always walks the full chronological history.
+* So does dropping the entry the index points at, which is the only way to keep
+  the entry that slides into its slot reachable (:meth:`History.remove`), and
+  so does trimming it away when ``max_entries`` is lowered
+  (:meth:`History.trim`).
 * Every press goes somewhere visibly different: entries near the cursor,
   within ``merge_line_distance`` lines of it, are skipped. That covers the
   newest entry on the first ``edit_trail_back`` from the head, and entries that
@@ -110,19 +122,31 @@ Performance
 -----------
 * ``on_modified`` runs synchronously on every keystroke, so it is kept to a
   handful of cheap API calls: ``is_scratch``, ``window``, ``is_loading``,
-  ``is_dirty``, ``active_view``, the primary selection (indexed directly, not
-  ``len`` then index), then ``get_regions`` for the newest entry. Seven, and
-  that is the whole cost of typing on once Sublime has shifted that entry's
-  region onto the cursor. When the region does have to move, two ``rowcol``
-  and one ``add_regions`` follow: ten. The panel/widget check is cached per
-  view, the modified view is known to be valid so no ``is_valid`` is needed,
-  and neither ``View.file_name`` nor the settings API is touched. The work does
-  not grow with file size or history length.
+  ``is_dirty``, ``active_view``, the primary selection (``View.sel()`` and
+  then indexing it, which is two round trips, not three: it is indexed
+  directly rather than ``len`` first), then ``get_regions`` for the newest
+  entry. Eight, and that is the whole cost of typing on once Sublime has
+  shifted that entry's region onto the cursor. When the region does have to
+  move, two ``rowcol`` and one ``add_regions`` follow: eleven. The panel/widget
+  check is cached per view, the modified view is known to be valid so no
+  ``is_valid`` is needed, and neither ``View.file_name`` nor the settings API
+  is touched. The work does not grow with file size or history length.
 * Two round trips are made off that per-keystroke path. ``View.file_name`` when
   a new entry is created (:class:`Entry`), which happens when the location is
-  new rather than on every key. And one ``set_timeout`` per burst of typing to
-  schedule :func:`_refresh_anchors`, which then costs three round trips per
-  attached entry, while the editor is idle.
+  new rather than on every key. And one ``set_timeout`` to schedule
+  :func:`_refresh_anchors`, at most once every ``ANCHOR_REFRESH_DELAY_MS``
+  however fast the keys come.
+* :func:`_refresh_anchors` itself is throttled, not debounced: it runs
+  ``ANCHOR_REFRESH_DELAY_MS`` after the first keystroke it was scheduled by,
+  whether or not typing has stopped. Deliberate: a true debounce would keep
+  deferring during a long burst, which is exactly when the fallback row/column
+  is drifting furthest from the region.
+* That run only visits the entries whose region can have moved, which are the
+  ones on a buffer modified since the last run. It costs two round trips per
+  such buffer, almost always one, and three per entry on it. Every other
+  entry, in every other file and window, is rejected on a view id, a Python
+  attribute rather than a round trip. So editing one file does not pay for the
+  history of the rest.
 * ``is_enabled`` on the commands, which Sublime calls on every palette and
   menu redraw, is a dictionary lookup with no API calls.
 * Navigation is lazy: a keypress never sweeps the history looking for entries
@@ -135,9 +159,10 @@ Performance
 * Memory is bounded: at most ``max_entries`` slotted :class:`Entry` objects
   and one slotted :class:`History` per window, plus one cached id per ordinary
   editor view modified (dropped when the view closes, or when its window does;
-  panels and widgets are never cached, see :func:`_is_trackable`).
-  ``_Config`` and ``_State`` are never instantiated; they are namespaces of
-  class attributes, so ``__slots__`` would not apply to them.
+  panels and widgets are never cached, see :func:`_is_trackable`), plus the
+  views modified since the last :func:`_refresh_anchors` run, emptied by every
+  run. ``_Config`` and ``_State`` are never instantiated; they are namespaces
+  of class attributes, so ``__slots__`` would not apply to them.
 * The synchronous handler is deliberate. Recording and navigation then share
   one thread, so the history needs no locks, and an edit immediately followed
   by ``edit_trail_back`` is already recorded. The one deferred piece of work,
@@ -162,11 +187,18 @@ commented at the code that avoids it.
 * Leaving entries anchored in a buffer that was reverted or reloaded from
   disk (:func:`_reanchor`).
 * Leaking the per-view kind cache when a window closes without closing each
-  tab (:meth:`EditTrailListener.on_pre_close_window`), or by caching views no
-  close hook reports at all, such as the find panel (:func:`_is_trackable`).
+  tab (:meth:`EditTrailListener.on_pre_close_window`), by sweeping only the
+  tabs ``Window.views()`` returns by default and so missing the preview tab
+  (same), or by caching views no close hook reports at all, such as the find
+  panel (:func:`_is_trackable`).
 * Letting an entry's fallback row/column go stale while its region moves, so
   that a buffer refilled from disk re-anchors the entry where it was first
   typed rather than where the edit ended up (:func:`_refresh_anchors`).
+* Paying for that refresh across the whole history when one file was edited,
+  or narrowing it to the modified view and so missing its clones, whose
+  regions moved with it (same). Re-anchoring after a revert or reload has the
+  same clone case, because the buffer they share is what was refilled
+  (:func:`_reanchor`).
 * Looking a clone up in the closing view's window and then handing it to
   another window's history, which would leave the entry tracking a view
   navigation from that window can never focus (:func:`_other_view_of_buffer`).
@@ -174,6 +206,13 @@ commented at the code that avoids it.
   validate as a count (:func:`_read_settings`).
 * A lowered ``max_entries`` not applying until the next edit
   (:meth:`History.trim`).
+* Stranding an entry by dropping the one the index points at and leaving the
+  index on the slot, so that both directions step over its replacement
+  (:meth:`History.remove`), or by clamping the index to 0 when a lowered
+  ``max_entries`` trims that entry away (:meth:`History.trim`).
+* Reporting an edit that merged into the newest location as if it had recorded
+  a new one, in the very setting meant to explain where locations come from
+  (:meth:`History.record`).
 * Rewriting the tracking region on every keystroke when Sublime has already
   shifted it onto the cursor (:meth:`Entry.merge`).
 * Reading ``View.file_name`` on the merge path, which runs on every keystroke:
@@ -185,8 +224,9 @@ commented at the code that avoids it.
 Compatibility
 -------------
 Requires Sublime Text build 4107 or later, the first stable Sublime Text 4
-release. The newest API used is ``View.buffer`` (build 4083); ``View.element``
-and the ``on_reload`` / ``on_revert`` listener hooks arrived in 4050. Builds before 4107 were dev-channel only.
+release. The newest API used is ``View.buffer`` (build 4083); ``View.element``,
+``Window.views(include_transient=...)`` and the ``on_reload`` / ``on_revert``
+listener hooks arrived in 4050. Builds before 4107 were dev-channel only.
 ``.python-version`` selects the modern plugin host, which is a real Python 3.8
 on stable builds before 4205, so this module must run on 3.8. It is fully
 typed all the same: annotations are postponed with
@@ -252,8 +292,18 @@ class _State:
             views that pass are cached, so panels and widgets, which no close
             hook reliably reports, cannot leak into it; see _is_trackable. Ids
             are dropped when the view closes, or when its window does.
-        refresh_pending: True while a debounced _refresh_anchors call is
-            scheduled, so a burst of typing schedules only one.
+        refresh_pending: True while a _refresh_anchors call is scheduled, so
+            no more than one timer is armed at a time however fast the keys
+            come. Cleared by the run, not by the typing stopping, which is what
+            makes the scheduling a throttle rather than a debounce.
+        refresh_modified: View id to view, for every trackable view modified
+            since the last _refresh_anchors run. Only entries on those views'
+            buffers can have had their regions shifted, so the run refreshes
+            those and leaves the rest of the history alone. Recording a view
+            here is a dictionary store, no API call, which is why the id is
+            paired with the view rather than the buffer: reading
+            View.buffer() would be two round trips on the keystroke path.
+            Emptied by each run, and on unload.
         key_counter: Source of unique region keys.
         region_prefix: Region key namespace for this plugin load, so a reload
             never collides with regions left behind by a previous load.
@@ -262,6 +312,7 @@ class _State:
     histories: ClassVar[dict[int, History]] = {}
     trackable: ClassVar[set[int]] = set()
     refresh_pending: ClassVar[bool] = False
+    refresh_modified: ClassVar[dict[int, sublime.View]] = {}
     key_counter: ClassVar[int] = 0
     region_prefix: ClassVar[str] = "edit_trail_"
 
@@ -462,11 +513,22 @@ class History:
         Merges into the newest entry when it is in the same view and within
         ``merge_line_distance`` lines, otherwise appends and trims the oldest
         entries beyond ``max_entries``. Always resets navigation to the head.
+
+        The two outcomes are reported separately under ``debug``, because a
+        merge adds no location and the setting is there to explain the
+        locations that do show up. The messages are built here rather than in
+        :meth:`EditTrailListener.on_modified`, which cannot tell the cases
+        apart, and the ``rowcol`` round trip they need is guarded so the
+        keystroke path never pays for it with ``debug`` off.
         """
         if self.entries and self.entries[-1].merge(view, point):
+            if _Config.debug:
+                _debug(f"merged edit at line {view.rowcol(point)[0] + 1} into the newest location", view)
             self.index = len(self.entries)
             return
 
+        if _Config.debug:
+            _debug(f"recorded new location at line {view.rowcol(point)[0] + 1}", view)
         self.entries.append(Entry(view, point))
         self.trim()
         self.index = len(self.entries)
@@ -476,21 +538,44 @@ class History:
 
         Also called when the settings change, so lowering ``max_entries``
         applies at once rather than only at the next edit.
+
+        An index pointing into the dropped range returns to the head, for the
+        reason :meth:`remove` sets out: clamping it to 0 instead would leave it
+        on an entry that was never visited, which going back cannot reach
+        (``is_enabled`` needs ``index > 0``) and going forward steps over, so
+        that entry is stranded until the next edit. Only reachable by lowering
+        ``max_entries`` mid-navigation: :meth:`record` overwrites the index
+        straight after trimming, and an index at the head stays there, because
+        ``overflow`` is never more than ``len(entries)``.
         """
         overflow = len(self.entries) - _Config.max_entries  # validated > 0 in _read_settings
         if overflow > 0:
             for entry in self.entries[:overflow]:
                 entry.detach()
             del self.entries[:overflow]
-            self.index = max(0, self.index - overflow)
+            self.index = len(self.entries) if self.index < overflow else self.index - overflow
 
     def remove(self, entry: Entry) -> None:
-        """Drop ``entry``, keeping ``index`` on the same logical position."""
+        """Drop ``entry``, keeping ``index`` on the same logical position.
+
+        An older entry shifts everything after it down one, so ``index`` follows.
+
+        Dropping the entry ``index`` itself points at is different: the entry
+        that slides into that slot has not been visited, and with
+        ``target = index + step`` no value of ``index`` can offer it to both
+        directions. Leaving ``index`` where it is makes forward skip it, and
+        going back skips it too, so it is unreachable until the next edit. So
+        navigation returns to the head instead, and going back walks the whole
+        history again from the newest. That re-visits the newer entries already
+        seen, which is cheap and visible, rather than silently losing one.
+        """
         position = self.entries.index(entry)
         entry.detach()
         del self.entries[position]
         if position < self.index:
             self.index -= 1
+        elif position == self.index:
+            self.index = len(self.entries)
 
     def clear(self) -> None:
         """Detach every entry, erasing their regions from open views."""
@@ -590,7 +675,7 @@ def _other_view_of_buffer(view: sublime.View, window_id: int) -> sublime.View | 
 
 
 def _refresh_anchors() -> None:
-    """Refresh every attached entry's fallback row/column. Runs when typing pauses.
+    """Refresh every attached entry's fallback row/column. Throttled off the keystroke path.
 
     An entry's position is a tracking region, which Sublime shifts as the text
     around it changes, but its row/column is only written when it is created or
@@ -600,16 +685,54 @@ def _refresh_anchors() -> None:
     typed: silently, and possibly hundreds of lines out.
 
     Doing it per keystroke would cost round trips proportional to the history,
-    so :meth:`EditTrailListener.on_modified` schedules this once per burst of
-    typing (``ANCHOR_REFRESH_DELAY_MS`` after the first keystroke of the burst)
-    and it sweeps every window's history then. ``set_timeout`` runs it on the
-    UI thread, the same thread that records and navigates, so the history still
-    needs no locks.
+    so :meth:`EditTrailListener.on_modified` schedules it at most once every
+    ``ANCHOR_REFRESH_DELAY_MS``: the first keystroke after a run arms the
+    timer, and the rest of that window cost no API call at all.
+
+    That is a throttle, not a debounce. It fires while typing continues rather
+    than waiting for a pause, which is the point: a debounce would defer
+    longest during exactly the long burst that drags each region furthest from
+    its remembered row/column, so a revert mid-burst would re-anchor from stale
+    numbers.
+
+    Only entries whose region can have moved are refreshed. Sublime shifts a
+    region when the text before it changes, so that is exactly the entries
+    attached to a view of a buffer modified since the last run: the views in
+    ``_State.refresh_modified`` and their clones, which share the same text.
+    Everything else, every other file and every other window, is rejected on a
+    view id, which is a Python attribute and not a round trip. So the cost is
+    two round trips per modified buffer (almost always one) plus three per
+    entry actually on it, rather than three per entry in every history.
+
+    The one case that cannot be narrowed is a modified view that closed inside
+    the throttle window: its buffer is no longer reachable from the dead view,
+    and an entry that moved to a clone (:meth:`Entry.move_to_clone`) took the
+    region without refreshing the row/column. That falls back to sweeping
+    everything, which is what this did unconditionally before.
+
+    ``set_timeout`` runs it on the UI thread, the same thread that records and
+    navigates, so the history still needs no locks.
     """
     _State.refresh_pending = False
+    modified = _State.refresh_modified
+    _State.refresh_modified = {}
+
+    sweep_all = False
+    views_on_modified_buffers: set[int] = set()
+    for view in modified.values():
+        if not view.is_valid():
+            sweep_all = True
+            break
+        for sibling in view.buffer().views():
+            views_on_modified_buffers.add(sibling.id())
+
     for history in _State.histories.values():
         for entry in history.entries:
-            entry.refresh_anchor()
+            entry_view = entry.view
+            if entry_view is None:
+                continue  # detached: its row/col is authoritative already
+            if sweep_all or entry_view.id() in views_on_modified_buffers:
+                entry.refresh_anchor()
 
 
 def _reanchor(view: sublime.View) -> None:
@@ -621,15 +744,27 @@ def _reanchor(view: sublime.View) -> None:
     dangling past the new end of file, with a fallback row/column last
     refreshed when the entry was created.
 
+    Clones of ``view`` share the buffer that was refilled, so their regions
+    were dropped or left dangling just the same, and Sublime is not documented
+    to send ``on_revert`` / ``on_reload`` for every view of a buffer. So the
+    entries to re-anchor are the ones on any view of the buffer, the same set
+    :func:`_refresh_anchors` widens to and for the same reason. Two extra round
+    trips, on a path that runs once per revert rather than per keystroke. Only
+    live views appear in ``Buffer.views()``, so matching an id there also
+    proves the entry's view is valid.
+
     Rare enough to scan every window's history rather than only the view's
     current window: a tab dragged between windows leaves entries behind in the
     old window's history, and they track this view too.
     """
+    sibling_ids = {sibling.id() for sibling in view.buffer().views()}
     for history in _State.histories.values():
         for entry in history.entries:
             entry_view = entry.view
-            if entry_view is not None and entry_view.id() == view.id():
-                entry.reanchor(view)
+            if entry_view is not None and entry_view.id() in sibling_ids:
+                # Each entry's regions live in its own view, not necessarily in
+                # the one Sublime reported the revert for.
+                entry.reanchor(entry_view)
 
 
 def _go(window: sublime.Window, history: History, entry: Entry) -> bool:
@@ -654,15 +789,22 @@ def _go(window: sublime.Window, history: History, entry: Entry) -> bool:
             view = found
 
     if view is not None:
-        point = entry.point()
-        if point is None:
+        # Regions are read straight from `view`, which live_view() has already
+        # proved valid: entry.point() would repeat that is_valid round trip,
+        # the same repeat Entry.detach() inlines to avoid.
+        regions = view.get_regions(entry.key)
+        if not regions:
             # Region lost, e.g. erased by another plugin: rebuild from row/col.
             entry.attach(view)
-            point = entry.point()
-        if point is not None:
+            regions = view.get_regions(entry.key)
+        if regions:
+            point = regions[0].b
             window.focus_view(view)
-            view.sel().clear()
-            view.sel().add(sublime.Region(point))
+            # One View.sel() round trip, not two: the Selection is bound to the
+            # view, so clearing and adding go through the same object.
+            selection = view.sel()
+            selection.clear()
+            selection.add(sublime.Region(point))
             view.show_at_center(point)
             return True
 
@@ -742,11 +884,17 @@ class EditTrailListener(sublime_plugin.EventListener):
         """
         if not _is_trackable(view):
             return
+        # Both of these come before the guards below, because a change this
+        # handler does not record still moves the tracking regions of entries
+        # in this view. A dictionary store, no API call: View.id() is a Python
+        # attribute, and it is the view rather than its buffer that is kept
+        # here precisely so the hot path never reads View.buffer().
+        _State.refresh_modified[view.id()] = view
         if not _State.refresh_pending:
-            # Debounced: one timer per burst of typing, not one per keystroke,
-            # and no API call at all for the rest of the burst. Scheduled
-            # before the guards below because a change this handler does not
-            # record still moves the tracking regions of entries in this view.
+            # Throttled: the first keystroke after a run arms the timer and
+            # the rest of that window cost no API call at all. Deliberately not
+            # re-armed per keystroke, which would defer the refresh for as long
+            # as typing continued; see _refresh_anchors.
             _State.refresh_pending = True
             sublime.set_timeout(_refresh_anchors, ANCHOR_REFRESH_DELAY_MS)
         window = view.window()
@@ -760,13 +908,11 @@ class EditTrailListener(sublime_plugin.EventListener):
             _debug("ignored change in a background view", view)
             return
         try:
-            # One round trip: indexing an empty Selection raises IndexError,
-            # whereas len() first would be a second call.
+            # Two round trips, View.sel() then indexing it: indexing an empty
+            # Selection raises IndexError, whereas len() first would be three.
             point = view.sel()[0].b
         except IndexError:
             return
-        if _Config.debug:  # guarded so the message is not built on every keystroke
-            _debug(f"recorded edit at line {view.rowcol(point)[0] + 1}", view)
         history = _State.histories.get(window.id())
         if history is None:
             history = _State.histories[window.id()] = History()
@@ -817,10 +963,15 @@ class EditTrailListener(sublime_plugin.EventListener):
         # path spelled differently from the one recorded (from a project file,
         # a symlink, or the goto-anything index). A string == would leave the
         # entry detached for good, reopening the file on every visit instead of
-        # re-attaching. The target is built once, not per entry.
+        # re-attaching. The target is built once, not per entry, and the plain
+        # string compare short-circuits the usual case of identical spellings,
+        # so Path() is only built for the entries that need the folding. That
+        # matters on a project restore, where this runs per file opened.
         target = Path(file_name)
         for entry in history.entries:
-            if entry.view is None and entry.file_name and Path(entry.file_name) == target:
+            if entry.view is not None or not entry.file_name:
+                continue
+            if entry.file_name == file_name or Path(entry.file_name) == target:
                 entry.attach(view)
 
     def on_revert(self, view: sublime.View) -> None:
@@ -839,8 +990,12 @@ class EditTrailListener(sublime_plugin.EventListener):
         Otherwise ``_State.trackable`` would keep one entry per view for the
         rest of the session: small, but unbounded, which the memory note in the
         module docstring promises it is not.
+
+        ``include_transient`` because ``Window.views()`` omits the preview tab by
+        default, and a preview the user typed in is an ordinary editor view that
+        got cached like any other.
         """
-        for view in window.views():
+        for view in window.views(include_transient=True):
             _State.trackable.discard(view.id())
         history = _State.histories.pop(window.id(), None)
         if history is not None:
@@ -923,4 +1078,5 @@ def plugin_unloaded() -> None:
     _State.trackable.clear()
     # A refresh already scheduled still fires, harmlessly, over empty histories.
     _State.refresh_pending = False
+    _State.refresh_modified.clear()
     sublime.load_settings(SETTINGS_FILE).clear_on_change("edit_trail")

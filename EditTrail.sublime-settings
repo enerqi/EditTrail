@@ -14,8 +14,8 @@
 	// further.
 	"merge_line_distance": 5,
 
-	// Print each recorded or ignored modification to the console
-	// (View > Show Console). Useful when a location shows up that you did not
-	// expect.
+	// Print each modification to the console (View > Show Console), saying
+	// whether it added a location, merged into the newest one, or was ignored.
+	// Useful when a location shows up that you did not expect.
 	"debug": false,
 }

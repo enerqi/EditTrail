@@ -1,0 +1,51 @@
+// Development project for EditTrail. Not part of the package: export-ignore in .gitattributes.
+//
+// Debugging the unit tests with the Debugger package (one-time: "Debugger: Install Adapters" > Python):
+//   F10 toggle breakpoint, Alt+F8 open and start (pick a configuration below), Alt+Down step over,
+//   Alt+[ step in, Alt+Up step out, F8 run to cursor, Ctrl+F8 continue.
+// The configurations run the project's own .venv interpreter directly, so uv's .python-version handling
+// (see justfile UV_PYTHON) does not apply. justMyCode is off so stepping reaches edit_trail.py and the
+// fake Sublime API in tests/conftest.py. Without the Debugger package, `just debug-test <pattern>` gives
+// the same in pdb.
+{
+	"folders": [
+		{
+			"path": ".",
+			"folder_exclude_patterns": [".venv", ".pytest_cache", ".ruff_cache", "__pycache__"],
+		},
+	],
+	"debugger_configurations": [
+		{
+			"name": "pytest: current test file",
+			"type": "python",
+			"request": "launch",
+			"python": "${project_path}/.venv/Scripts/python.exe",
+			"module": "pytest",
+			"args": ["${file}", "-p", "no:cacheprovider"],
+			"cwd": "${project_path}",
+			"justMyCode": false,
+		},
+		{
+			// Select a test name (or any -k expression) before starting. If the Debugger version in use
+			// does not expand ${selected_text}, use the current-file configuration instead.
+			"name": "pytest: tests matching selection",
+			"type": "python",
+			"request": "launch",
+			"python": "${project_path}/.venv/Scripts/python.exe",
+			"module": "pytest",
+			"args": ["-k", "${selected_text}", "-p", "no:cacheprovider"],
+			"cwd": "${project_path}",
+			"justMyCode": false,
+		},
+		{
+			"name": "pytest: last failed",
+			"type": "python",
+			"request": "launch",
+			"python": "${project_path}/.venv/Scripts/python.exe",
+			"module": "pytest",
+			"args": ["--lf"],
+			"cwd": "${project_path}",
+			"justMyCode": false,
+		},
+	],
+}

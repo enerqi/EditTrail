@@ -103,6 +103,7 @@ class FakeView:
         scratch: bool = False,
         widget: bool = False,
         element: str | None = None,
+        transient: bool = False,
     ) -> None:
         self._id = next(_ids)
         self.win = window
@@ -117,6 +118,7 @@ class FakeView:
         self._element = element
         self.dirty = False
         self.loading = False
+        self.transient = transient
         window._views.append(self)
 
     # Sublime API surface
@@ -252,8 +254,9 @@ class FakeWindow:
     def id(self) -> int:
         return self._id
 
-    def views(self) -> list[FakeView]:
-        return list(self._views)
+    def views(self, *, include_transient: bool = False) -> list[FakeView]:
+        """Sublime omits the preview tab unless include_transient is asked for."""
+        return [v for v in self._views if include_transient or not v.transient]
 
     def active_view(self) -> FakeView | None:
         return self.active

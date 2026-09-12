@@ -7,6 +7,8 @@ justfile        export-ignore
 pyproject.toml  export-ignore
 uv.lock         export-ignore
 tests/          export-ignore
+*.sublime-project   export-ignore
+*.sublime-workspace export-ignore
 
 # Declare line-ending normalisation rather than inherit each developer's core.autocrlf.
 *               text=auto

@@ -151,9 +151,14 @@ def test_debug_setting_prints_decisions(window: FakeWindow, tmp_path: Path, caps
     view = FakeView(window, fa)
     view.external_change(0, BODY)
     view.type_at_row(3, "x")
+    view.type_at_row(4, "y")
     out = capsys.readouterr().out
     assert "ignored change with no unsaved edits" in out
-    assert "recorded edit at line 4" in out
+    assert "recorded new location at line 4" in out
+    # The second edit is one line away, so it merges: no new location, and the
+    # message says so rather than claiming another one was recorded.
+    assert "merged edit at line 5 into the newest location" in out
+    assert len(_history(window).entries) == 1
 
 
 def test_modification_with_no_selection_is_ignored(
@@ -191,6 +196,31 @@ def test_lowering_max_entries_trims_the_existing_history(window: FakeWindow, tmp
     assert [row for _, row in _rows(history)] == [80, 90]
     assert len(a.regions) == 2
     assert history.index == 2
+
+
+def test_trimming_the_entry_you_are_on_does_not_strand_its_replacement(window: FakeWindow, tmp_path: Path) -> None:
+    """A lowered max_entries that drops the entry the index points at returns to the head.
+
+    Clamping the index to 0 instead would leave it on an entry never visited, which back cannot
+    reach (is_enabled needs index > 0) and forward steps over.
+    """
+    (fa,) = _files(tmp_path, "a.txt")
+    a = FakeView(window, fa, BODY)
+    for row in (0, 20, 40, 60, 80):
+        a.type_at_row(row, "e")
+    history = _history(window)
+    edit_trail._navigate(window, -1)
+    edit_trail._navigate(window, -1)
+    assert history.index == 2  # on the row 40 entry
+
+    plugin_settings.set("max_entries", 2)  # drops rows 0, 20 and 40
+    assert [row for _, row in _rows(history)] == [60, 80]
+    assert history.index == 2  # the head, not clamped to 0
+
+    edit_trail._navigate(window, -1)
+    assert a.cursor_row() == 80
+    edit_trail._navigate(window, -1)
+    assert a.cursor_row() == 60  # reachable, not stranded
 
 
 def test_invalid_settings_fall_back_to_defaults() -> None:
@@ -348,6 +378,21 @@ def test_revert_reanchors_entries_whose_region_was_dropped(window: FakeWindow, t
     assert 0 <= point <= a.size()
 
 
+def test_revert_reanchors_entries_on_a_clone_of_the_reverted_buffer(window: FakeWindow, tmp_path: Path) -> None:
+    """Clones share the refilled buffer, so their regions dangle too, whichever view Sublime reports."""
+    (fa,) = _files(tmp_path, "a.txt")
+    a = FakeView(window, fa, BODY)
+    clone = FakeView(window, fa, buffer=a.buf)
+    clone.type_at_row(90, "x")
+    entry = _history(window).entries[0]
+    assert entry.view is clone
+
+    a.revert("only\ntwo lines")  # on_revert fires for a, not the clone
+    point = entry.point()
+    assert point is not None
+    assert 0 <= point <= clone.size()  # not left dangling past the new end of file
+
+
 def test_reload_refreshes_the_fallback_row_from_a_surviving_region(window: FakeWindow, tmp_path: Path) -> None:
     (fa,) = _files(tmp_path, "a.txt")
     a = FakeView(window, fa, BODY)
@@ -370,6 +415,58 @@ def test_idle_refresh_moves_the_fallback_row_with_the_region(window: FakeWindow,
 
     run_timeouts()  # the editor goes idle
     assert entry.row == 150
+
+
+def test_idle_refresh_follows_a_clone_of_the_modified_buffer(window: FakeWindow) -> None:
+    """Typing in one view shifts the regions of every view of its buffer, so clones refresh too."""
+    a = FakeView(window, None, BODY)
+    clone = FakeView(window, None, buffer=a.buf)
+    a.type_at_row(50, "x")
+    entry = _history(window).entries[0]
+    entry.move_to_clone(a, clone)  # region in the clone now, row/col left as it was
+
+    a.type_at_row(0, "new\n" * 100)
+    run_timeouts()
+
+    assert entry.row == 150
+
+
+def test_idle_refresh_leaves_entries_on_untouched_buffers_alone(window: FakeWindow, tmp_path: Path) -> None:
+    """Only buffers modified since the last run can have shifted, so only those cost round trips."""
+    fa, fb = _files(tmp_path, "a.txt", "b.txt")
+    a, b = FakeView(window, fa, BODY), FakeView(window, fb, BODY)
+    a.type_at_row(50, "x")
+    b.type_at_row(50, "y")
+    run_timeouts()
+    entry_a, entry_b = _history(window).entries
+
+    # Shift a's region without going through on_modified, so a refresh that swept
+    # everything would pick the change up and a correctly scoped one would too.
+    a._insert(0, "new\n" * 100)
+    # Shift b's the same way, but keep b out of the modified set.
+    b._insert(0, "new\n" * 100)
+    a.type_at_row(0, "z")  # only a is reported modified
+    run_timeouts()
+
+    assert entry_a.row == 150
+    assert entry_b.row == 50  # not visited: b's buffer was never reported modified
+
+
+def test_idle_refresh_sweeps_everything_when_a_modified_view_has_closed(window: FakeWindow, tmp_path: Path) -> None:
+    """A dead view cannot name its buffer, so the run falls back to refreshing every entry."""
+    fa, fb = _files(tmp_path, "a.txt", "b.txt")
+    a, b = FakeView(window, fa, BODY), FakeView(window, fb, BODY)
+    a.type_at_row(50, "x")
+    b.type_at_row(50, "y")
+    run_timeouts()
+    entry_b = _history(window).entries[1]
+
+    b._insert(0, "new\n" * 100)
+    a.type_at_row(0, "z")
+    a.close()  # modified inside the throttle window, then gone before it fired
+    run_timeouts()
+
+    assert entry_b.row == 150
 
 
 def test_a_dropped_region_reanchors_where_the_edit_ended_up(window: FakeWindow, tmp_path: Path) -> None:
@@ -549,3 +646,44 @@ def test_unload_erases_all_regions(window: FakeWindow, tmp_path: Path) -> None:
     edit_trail.plugin_unloaded()
     assert a.regions == {}
     assert edit_trail._State.histories == {}
+
+
+def test_closing_the_view_of_the_entry_you_are_on_leaves_no_entry_stranded(window: FakeWindow) -> None:
+    """Dropping the entry ``index`` points at returns to the head, keeping every entry reachable.
+
+    The dropped entry is an unsaved buffer's only view, so on_pre_close has nothing to reopen and
+    nowhere to move it. Leaving ``index`` on the slot would make both directions step over the entry
+    that slid into it.
+    """
+    views = [FakeView(window, None if i == 1 else f"/f{i}.txt", BODY) for i in range(4)]
+    for i, view in enumerate(views):
+        view.type_at_row(i * 20, "x")
+    history = _history(window)
+    back = edit_trail.EditTrailBackCommand(window)
+    back.run()
+    back.run()
+    assert history.index == 1  # standing on the unsaved buffer's entry
+    unsaved = history.entries[1]
+
+    views[1].close()
+
+    assert unsaved not in history.entries
+    assert history.index == len(history.entries)  # back at the head
+    # The entry that took slot 1 is still reachable, and nothing is skipped.
+    assert [row for _, row in _rows(history)] == [0, 40, 60]
+    back.run()
+    back.run()
+    back.run()
+    assert [entry.row for entry in history.entries][history.index] == 0
+
+
+def test_window_close_forgets_the_cached_kind_of_a_preview_tab(
+    window: FakeWindow, listener: edit_trail.EditTrailListener, tmp_path: Path
+) -> None:
+    """Window.views() omits the preview tab, so the sweep has to ask for it explicitly."""
+    (fa,) = _files(tmp_path, "a.txt")
+    preview = FakeView(window, fa, BODY, transient=True)
+    preview.type_at_row(10, "x")
+    assert preview.id() in edit_trail._State.trackable
+    listener.on_pre_close_window(window)
+    assert preview.id() not in edit_trail._State.trackable

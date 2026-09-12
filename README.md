@@ -28,6 +28,9 @@ back to them. History is per window and resets when Sublime restarts.
 - `merge_line_distance` (5): edits this close to the newest location, in the same file, update it.
   The same distance is what counts as "already here" when navigating, so locations within it of the
   cursor are skipped.
+- `debug` (false): print each edit to the console (View > Show Console), saying whether it added a
+  location, merged into the newest one, or was ignored. Useful when a location shows up that you did
+  not expect.
 
 ## Development
 
