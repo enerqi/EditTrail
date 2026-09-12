@@ -41,5 +41,15 @@ just install-dev   # link this checkout into Sublime's Packages dir
 just qa            # lint, format check, type check, tests on Python 3.14 and 3.8
 ```
 
+The tests run against a fake Sublime API, so they cannot catch the editor changing behaviour the
+plugin assumes (regions moving with the text, what a revert does to them). `edit_trail_selftest.py`
+checks those assumptions in the editor itself. It is a development file, kept out of released
+packages, and has no palette entry; run it from the console (View > Show Console) after a Sublime
+upgrade:
+
+```python
+window.run_command("edit_trail_selftest")
+```
+
 Run `just` to see all recipes. The justfile comments explain the setup, including why `UV_PYTHON` is
 exported.

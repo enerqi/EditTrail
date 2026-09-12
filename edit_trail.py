@@ -21,7 +21,7 @@ Settings (``EditTrail.sublime-settings``)
 ``max_entries``
     Maximum edit locations kept per window. Default 50.
 ``merge_line_distance``
-    Edits within this many lines of the newest entry, in the same view, update
+    Edits within this many lines of the newest entry, in the same file, update
     that entry instead of adding a new one. Default 5. The same distance also
     decides which entries navigation treats as "where the cursor already is"
     and skips (see `Navigation semantics`), so raising it to record fewer
@@ -131,11 +131,17 @@ Performance
   check is cached per view, the modified view is known to be valid so no
   ``is_valid`` is needed, and neither ``View.file_name`` nor the settings API
   is touched. The work does not grow with file size or history length.
-* Two round trips are made off that per-keystroke path. ``View.file_name`` when
-  a new entry is created (:class:`Entry`), which happens when the location is
-  new rather than on every key. And one ``set_timeout`` to schedule
-  :func:`_refresh_anchors`, at most once every ``ANCHOR_REFRESH_DELAY_MS``
-  however fast the keys come.
+* Three round trips are made off that per-keystroke path. ``View.file_name``
+  and ``View.buffer_id`` when a new entry is created (:class:`Entry`), which
+  happens when the location is new rather than on every key. And one
+  ``set_timeout`` to schedule :func:`_refresh_anchors`, at most once every
+  ``ANCHOR_REFRESH_DELAY_MS`` however fast the keys come.
+* Typing in a second view of a file the newest entry is already in (a split
+  pane, ``File > New View into File``) costs a ``buffer_id`` beyond the eight
+  above, then ``is_valid``, ``get_regions``, ``erase_regions`` and
+  ``add_regions`` to move the entry into that view: thirteen, and only for the
+  first such keystroke. The entry is then in the view being typed in, so the
+  ones after it take the same-view path (:meth:`Entry._merge_from_clone`).
 * :func:`_refresh_anchors` itself is throttled, not debounced: it runs
   ``ANCHOR_REFRESH_DELAY_MS`` after the first keystroke it was scheduled by,
   whether or not typing has stopped. Deliberate: a true debounce would keep
@@ -182,6 +188,14 @@ commented at the code that avoids it.
   path cased or separated differently from the one recorded, so re-attaching
   compares ``Path`` objects, whose equality folds both there
   (:meth:`EditTrailListener.on_load`).
+* Treating two views of one file as two files, so that a split pane records a
+  second entry on the line just edited in the other pane and navigation stops
+  twice in the same place. Entries are keyed to the buffer, not the view
+  (:meth:`Entry.merge`, :func:`_near_cursor`).
+* Reading ``entry.view is not None`` as "still tracking". A view invalidated
+  without ``on_pre_close`` leaves a dead view there, not None, so re-attaching
+  on load tests :meth:`Entry.live_view` instead
+  (:meth:`EditTrailListener.on_load`).
 * Sweeping the whole history for dead entries on every navigation keypress:
   they are dropped lazily by :func:`_go` instead (:func:`_navigate`).
 * Leaving entries anchored in a buffer that was reverted or reloaded from
@@ -221,12 +235,61 @@ commented at the code that avoids it.
   is what keeps an entry reopenable when its view is invalidated without
   ``on_pre_close``, as happens when a whole window closes.
 
+API contract relied on
+----------------------
+Sublime's ``sublime.py`` is fully annotated, but annotations give shapes, not
+behaviour: nothing in them says a region moves with the text, or what a revert
+does to one. These are the behaviours this plugin is built on. A type checker
+cannot hold Sublime to them, and neither can the unit tests, which answer with
+a fake (``tests/conftest.py``) that would keep answering the old way if a
+release changed one. ``edit_trail_selftest`` checks them inside the editor; run
+it after a Sublime upgrade.
+
+* Regions shift as text is inserted or deleted before them, and are left alone
+  by edits after them. The whole tracking scheme rests on this, and
+  :meth:`Entry.merge` rewrites a region only when Sublime has not already
+  shifted it onto the cursor.
+* ``add_regions`` with a key that already has regions replaces them, so
+  re-placing an entry never accumulates regions (:meth:`Entry._place`).
+* ``get_regions`` returns copies. A position is read out of them and a new
+  region added to move it, never written back through them
+  (:meth:`Entry.point`).
+* Regions belong to a view, not to its buffer, so an entry must be re-placed on
+  a clone rather than inherited (:meth:`Entry.move_to_clone`). An edit in any
+  view of a buffer shifts the regions of every view of it, which is why the
+  idle refresh covers a modified view's clones (:func:`_refresh_anchors`).
+* ``View.buffer_id`` is shared by every view of one buffer and differs between
+  files, which is what makes an edit in a split pane the same location rather
+  than a new one (:meth:`Entry.merge`).
+* A revert or reload may drop a region, or leave it past the end of a file that
+  shrank. Unspecified either way, so both are handled (:meth:`Entry.reanchor`).
+* ``View.sel()`` is backed by the view, and indexing an empty selection raises
+  ``IndexError`` rather than returning anything. That is what the hot path uses
+  in place of a ``len`` round trip (:meth:`EditTrailListener.on_modified`), and
+  what makes focusing a view without a cursor a visible failure rather than a
+  silent one.
+* A view still being filled reports ``is_loading``, and one filled from disk
+  matches disk (``not is_dirty``). Both are guards rather than documented
+  guarantees; the hot-exit case that satisfies neither is under
+  `How recording works`.
+* ``Window.views()`` omits the preview tab unless ``include_transient=True``
+  (:meth:`EditTrailListener.on_pre_close_window`), and ``on_pre_close`` runs
+  while the view and its regions can still be read (:meth:`Entry.detach`).
+* ``View.file_name`` can hand back a path spelled differently from the one
+  recorded, so paths are compared as ``Path``
+  (:meth:`EditTrailListener.on_load`).
+* Listener hooks are dispatched by name, not by override: ``sublime_plugin``
+  declares none of them on ``EventListener``, so a mistyped hook is simply a
+  method that never runs, and nothing in the type system notices. Checked by
+  ``tests/test_api_contract.py``.
+
 Compatibility
 -------------
 Requires Sublime Text build 4107 or later, the first stable Sublime Text 4
-release. The newest API used is ``View.buffer`` (build 4083); ``View.element``,
-``Window.views(include_transient=...)`` and the ``on_reload`` / ``on_revert``
-listener hooks arrived in 4050. Builds before 4107 were dev-channel only.
+release. The newest APIs used are ``View.buffer`` and
+``Window.views(include_transient=...)``, both build 4081; ``View.element`` and
+the ``on_reload`` / ``on_revert`` listener hooks arrived in 4050, and
+``View.buffer_id`` predates Sublime Text 4 entirely. Builds before 4107 were dev-channel only.
 ``.python-version`` selects the modern plugin host, which is a real Python 3.8
 on stable builds before 4205, so this module must run on 3.8. It is fully
 typed all the same: annotations are postponed with
@@ -330,6 +393,12 @@ class Entry:
     Attributes:
         view: The live view holding the tracking region, or None while the file
             is closed.
+        buffer_id: Id of the buffer that view shows, refreshed whenever the
+            entry attaches to a view. Several views can show one buffer (a
+            split pane, ``File > New View into File``) and they share its text,
+            so an edit in any of them is an edit at this location; the buffer id
+            is what recognises that, where a view id cannot. Meaningless while
+            detached, and replaced by the next :meth:`attach`.
         file_name: Absolute path of the file, or None for a buffer that has
             never been saved. Recorded when the entry is created and refreshed
             by :meth:`detach`, so it follows a buffer saved, or saved under a
@@ -345,9 +414,10 @@ class Entry:
         col: Last known 0-based column, see ``row``.
     """
 
-    __slots__ = ("col", "file_name", "key", "row", "view")
+    __slots__ = ("buffer_id", "col", "file_name", "key", "row", "view")
     # Declared types of the slots (bare annotations do not conflict with __slots__).
     view: sublime.View | None
+    buffer_id: int
     file_name: str | None
     key: str
     row: int
@@ -359,6 +429,9 @@ class Entry:
         # merged into the newest entry. detach() refreshes it, see the class
         # docstring.
         self.file_name = view.file_name()
+        # A second round trip, on the same new-location path rather than the
+        # keystroke one: see merge().
+        self.buffer_id = view.buffer_id()
         self.key = _new_region_key()
         self.row, self.col = view.rowcol(point)
         self._place(view, point)
@@ -368,7 +441,7 @@ class Entry:
         view.add_regions(self.key, [sublime.Region(point)], flags=sublime.HIDDEN)
 
     def merge(self, view: sublime.View, point: int) -> bool:
-        """Move this entry to ``point`` if it is attached to ``view`` and near it.
+        """Move this entry to ``point`` if it is on ``view``'s buffer and near it.
 
         Keystroke hot path. ``view`` is the view being modified, so it is known
         to be valid and no ``is_valid`` round trip is needed; comparing ids is a
@@ -376,11 +449,18 @@ class Entry:
         that before the path is ever needed.
 
         Returns:
-            True if the entry was attached to ``view`` within
-            ``merge_line_distance`` lines of ``point`` and has been moved there.
+            True if the entry was within ``merge_line_distance`` lines of
+            ``point`` in ``view``'s buffer and has been moved there.
         """
-        if self.view is None or self.view.id() != view.id():
+        if self.view is None:
             return False
+        if self.view.id() != view.id():
+            # A different view. Only the buffer id can tell a genuinely other
+            # file from a second view of this one, and it is read here rather
+            # than on the common path above, which costs nothing.
+            if self.buffer_id != view.buffer_id():
+                return False
+            return self._merge_from_clone(view, point)
         regions = view.get_regions(self.key)
         if not regions:
             return False
@@ -392,6 +472,37 @@ class Entry:
             return True
         if not _near(view, here, point):
             return False
+        self._place(view, point)
+        return True
+
+    def _merge_from_clone(self, view: sublime.View, point: int) -> bool:
+        """Merge an edit made in another view of this entry's buffer.
+
+        Views of one buffer show the same text, so the tracking region has
+        already shifted the same way in both and ``point`` means the same place
+        in either: an edit here is at this location, not a new one. Recording it
+        as new is what would otherwise put one entry per pane on the same line,
+        and leave navigation stopping twice in the same place.
+
+        Tracking moves to the view the user is typing in, so that going back
+        lands in the pane they last edited in, and so that the next keystroke
+        takes the same-view path in :meth:`merge` rather than paying for this
+        one again.
+
+        Returns:
+            True if the entry has been moved to ``point`` in ``view``.
+        """
+        old = self.live_view()
+        if old is None:
+            return False
+        regions = old.get_regions(self.key)
+        if not regions:
+            return False
+        here = regions[0].b
+        if here != point and not _near(view, here, point):
+            return False
+        old.erase_regions(self.key)
+        self.view = view
         self._place(view, point)
         return True
 
@@ -452,6 +563,7 @@ class Entry:
         changed on disk while it was closed.
         """
         self.view = view
+        self.buffer_id = view.buffer_id()
         last_row = view.rowcol(view.size())[0]
         line = view.line(view.text_point(min(self.row, last_row), 0))
         self._place(view, min(line.a + self.col, line.b))
@@ -483,6 +595,7 @@ class Entry:
             self.attach(clone)
         else:
             self.view = clone
+            # buffer_id is left as it is: the clone shows the same buffer.
             self._place(clone, point)
 
     def is_reachable(self) -> bool:
@@ -510,7 +623,7 @@ class History:
     def record(self, view: sublime.View, point: int) -> None:
         """Record an edit at ``point`` in ``view``.
 
-        Merges into the newest entry when it is in the same view and within
+        Merges into the newest entry when it is on the same buffer and within
         ``merge_line_distance`` lines, otherwise appends and trims the oldest
         entries beyond ``max_entries``. Always resets navigation to the head.
 
@@ -637,17 +750,28 @@ def _active_cursor(window: sublime.Window) -> Cursor:
 
 
 def _near_cursor(cursor: Cursor, entry: Entry) -> bool:
-    """Return True if ``entry`` is in the cursor's view, near the cursor.
+    """Return True if ``entry`` is where the cursor already is.
 
-    The active view is valid, so matching its id means the entry is attached
-    to a live view and no ``is_valid`` round trip is needed.
+    An entry in another view of the active view's buffer counts: the two show
+    the same text, so its position is on screen at the same place and going
+    there would not move the user anywhere they can see.
+
+    The active view is valid, so matching its id means the entry is attached to
+    a live view and no ``is_valid`` round trip is needed. A clone costs that
+    round trip plus a ``buffer_id``, on the navigation path only.
     """
-    if cursor is None:
+    if cursor is None or entry.view is None:
         return False
     view, cursor_point = cursor
-    if entry.view is None or entry.view.id() != view.id():
+    if entry.view.id() == view.id():
+        anchor: sublime.View | None = view
+    elif entry.buffer_id == view.buffer_id():
+        anchor = entry.live_view()
+    else:
         return False
-    regions = view.get_regions(entry.key)
+    if anchor is None:
+        return False
+    regions = anchor.get_regions(entry.key)
     return bool(regions) and _near(view, cursor_point, regions[0].b)
 
 
@@ -969,9 +1093,18 @@ class EditTrailListener(sublime_plugin.EventListener):
         # matters on a project restore, where this runs per file opened.
         target = Path(file_name)
         for entry in history.entries:
-            if entry.view is not None or not entry.file_name:
+            if not entry.file_name:
                 continue
-            if entry.file_name == file_name or Path(entry.file_name) == target:
+            if entry.file_name != file_name and Path(entry.file_name) != target:
+                continue
+            # Liveness, not `entry.view is not None`: a view can be invalidated
+            # without on_pre_close (a whole window closing), which leaves the
+            # entry holding a dead view rather than None. Reading it as "still
+            # tracking" would leave the entry anchored to nothing for the rest
+            # of the session, reopening the file on every visit and merging no
+            # further edits into it. The round trip is paid only for entries of
+            # the file just opened, which is why the paths are compared first.
+            if entry.live_view() is None:
                 entry.attach(view)
 
     def on_revert(self, view: sublime.View) -> None:

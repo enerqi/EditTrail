@@ -66,6 +66,40 @@ def test_far_edits_and_other_files_add_entries(window: FakeWindow, tmp_path: Pat
     assert _rows(_history(window)) == [(fa, 10), (fa, 50), (fb, 5)]
 
 
+def test_edits_in_a_second_pane_merge_into_the_same_location(window: FakeWindow, tmp_path: Path) -> None:
+    """A split pane shows the same buffer, so an edit in it is the same location, not a new one."""
+    (fa,) = _files(tmp_path, "a.txt")
+    pane_one = FakeView(window, fa, BODY)
+    pane_two = FakeView(window, fa, buffer=pane_one.buf)
+    pane_one.type_at_row(10, "x")
+    pane_two.type_at_row(10, "y")
+    pane_one.type_at_row(11, "z")
+    assert _rows(_history(window)) == [(fa, 11)]
+
+
+def test_a_merged_edit_moves_tracking_to_the_pane_it_was_typed_in(window: FakeWindow, tmp_path: Path) -> None:
+    """Going back should land in the pane last edited, and leave no region behind in the other."""
+    (fa,) = _files(tmp_path, "a.txt")
+    pane_one = FakeView(window, fa, BODY)
+    pane_two = FakeView(window, fa, buffer=pane_one.buf)
+    pane_one.type_at_row(10, "x")
+    pane_two.type_at_row(10, "y")
+
+    entry = _history(window).entries[0]
+    assert entry.live_view() is pane_two
+    assert pane_one.get_regions(entry.key) == []
+
+
+def test_far_edits_in_another_pane_still_add_an_entry(window: FakeWindow, tmp_path: Path) -> None:
+    """Sharing a buffer is not enough: the edit still has to be near the newest location."""
+    (fa,) = _files(tmp_path, "a.txt")
+    pane_one = FakeView(window, fa, BODY)
+    pane_two = FakeView(window, fa, buffer=pane_one.buf)
+    pane_one.type_at_row(10, "x")
+    pane_two.type_at_row(50, "y")
+    assert _rows(_history(window)) == [(fa, 10), (fa, 50)]
+
+
 def test_zero_merge_distance_only_merges_same_line(window: FakeWindow, tmp_path: Path) -> None:
     plugin_settings.set("merge_line_distance", 0)
     (fa,) = _files(tmp_path, "a.txt")
@@ -272,6 +306,22 @@ def test_back_does_not_skip_newest_when_cursor_is_elsewhere(window: FakeWindow, 
     window.active = a
     edit_trail._navigate(window, -1)
     assert window.active is b
+
+
+def test_back_skips_an_entry_showing_at_the_cursor_in_another_pane(window: FakeWindow, tmp_path: Path) -> None:
+    """The other pane shows the same text, so going there would not move the user anywhere."""
+    (fa,) = _files(tmp_path, "a.txt")
+    pane_one = FakeView(window, fa, BODY)
+    pane_one.type_at_row(10, "x")
+    pane_one.type_at_row(50, "y")
+
+    pane_two = FakeView(window, fa, buffer=pane_one.buf)
+    pane_two.cursor = pane_two.text_point(50, 0)
+    window.active = pane_two
+    edit_trail._navigate(window, -1)
+
+    assert window.active is pane_one
+    assert pane_one.cursor_row() == 10
 
 
 def test_new_edit_returns_to_head_without_truncating(window: FakeWindow, tmp_path: Path) -> None:
@@ -541,6 +591,40 @@ def test_entry_is_reopenable_when_its_view_dies_without_on_pre_close(window: Fak
     FakeView(window, None, BODY).type_at_row(0, "elsewhere")
     edit_trail._navigate(window, -1)
     assert window.opened == [f"{fa}:11:2"]
+
+
+def test_reopening_reattaches_when_the_view_died_without_on_pre_close(
+    window: FakeWindow, listener: edit_trail.EditTrailListener, tmp_path: Path
+) -> None:
+    """The entry holds a dead view, not None, so re-attaching has to test liveness."""
+    (fa,) = _files(tmp_path, "a.txt")
+    a = FakeView(window, fa, BODY)
+    a.type_at_row(10, "x")
+    entry = _history(window).entries[0]
+    window._views.remove(a)  # the tab was dragged to another window, which then closed
+    a.valid = False
+
+    reopened = FakeView(window, fa, BODY)
+    listener.on_load(reopened)
+    assert entry.live_view() is reopened
+    assert reopened.get_regions(entry.key)
+
+    reopened.type_at_row(11, "y")  # tracking again, so a nearby edit merges rather than piling up
+    assert _rows(_history(window)) == [(fa, 11)]
+
+
+def test_reopening_leaves_an_entry_already_tracking_in_a_live_view_alone(
+    window: FakeWindow, listener: edit_trail.EditTrailListener, tmp_path: Path
+) -> None:
+    """Opening a second view of an open file must not move entries off the view they are in."""
+    (fa,) = _files(tmp_path, "a.txt")
+    a = FakeView(window, fa, BODY)
+    a.type_at_row(10, "x")
+    entry = _history(window).entries[0]
+
+    second = FakeView(window, fa, buffer=a.buf)
+    listener.on_load(second)
+    assert entry.live_view() is a
 
 
 def test_buffer_saved_after_edit_is_reopenable(window: FakeWindow, tmp_path: Path) -> None:

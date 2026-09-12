@@ -3,7 +3,8 @@
 Only the parts of ``sublime`` / ``sublime_plugin`` that edit_trail touches are modelled, with just enough
 behaviour to exercise its logic:
 
-* A FakeBuffer holds text shared by every FakeView cloned from it.
+* A FakeBuffer holds text shared by every FakeView cloned from it, and has an id of its own, as
+  Sublime's does: FakeView.buffer_id() is what tells a split pane of one file from another file.
 * Regions are stored per view as single points and shift on insertion, mimicking how Sublime moves
   regions when text is inserted before them.
 * FakeSelection is backed by the view, as Sublime's Selection is, so clear() really does leave the view
@@ -64,8 +65,12 @@ class FakeSettings:
 
 class FakeBuffer:
     def __init__(self, text: str = "") -> None:
+        self._id = next(_ids)
         self.text = text
         self._views: list[FakeView] = []
+
+    def id(self) -> int:
+        return self._id
 
     def views(self) -> list[FakeView]:
         return [v for v in self._views if v.valid]
@@ -151,6 +156,10 @@ class FakeView:
 
     def buffer(self) -> FakeBuffer:
         return self.buf
+
+    def buffer_id(self) -> int:
+        """Shared by every view of one buffer, as Sublime's is: what makes a clone the same file."""
+        return self.buf.id()
 
     def settings(self) -> FakeSettings:
         return self._settings

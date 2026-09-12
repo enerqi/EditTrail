@@ -7,6 +7,7 @@ justfile        export-ignore
 pyproject.toml  export-ignore
 uv.lock         export-ignore
 tests/          export-ignore
+edit_trail_selftest.py  export-ignore
 *.sublime-project   export-ignore
 *.sublime-workspace export-ignore
 
