@@ -1,0 +1,14 @@
+EditTrail
+=========
+
+Step back and forward through the places you edited, across files.
+
+EditTrail binds no keys. Add your own with
+"Preferences: EditTrail Key Bindings" from the command palette, for example:
+
+    { "keys": ["ctrl+."], "command": "edit_trail_back" },
+    { "keys": ["ctrl+shift+."], "command": "edit_trail_forward" },
+
+Both commands are also in the command palette as
+"EditTrail: Go to Previous Edit Location" and
+"EditTrail: Go to Next Edit Location".

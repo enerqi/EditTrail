@@ -1,0 +1,7 @@
+// EditTrail binds no keys by default.
+// Copy the examples below into your user key bindings
+// (Preferences: EditTrail Key Bindings) and change the keys to taste.
+[
+	// { "keys": ["ctrl+."], "command": "edit_trail_back" },
+	// { "keys": ["ctrl+shift+."], "command": "edit_trail_forward" },
+]

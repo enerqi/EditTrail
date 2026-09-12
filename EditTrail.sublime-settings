@@ -1,0 +1,16 @@
+// EditTrail default settings.
+// Override them in Preferences > Package Settings > EditTrail > Settings.
+{
+	// Maximum edit locations remembered per window. Oldest are discarded first.
+	"max_entries": 50,
+
+	// Edits within this many lines of the newest location, in the same file,
+	// update that location instead of adding a new one. 0 merges only edits on
+	// the same line.
+	"merge_line_distance": 5,
+
+	// Print each recorded or ignored modification to the console
+	// (View > Show Console). Useful when a location shows up that you did not
+	// expect.
+	"debug": false,
+}

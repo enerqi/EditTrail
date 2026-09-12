@@ -1,0 +1,21 @@
+[
+	{ "caption": "EditTrail: Go to Previous Edit Location", "command": "edit_trail_back" },
+	{ "caption": "EditTrail: Go to Next Edit Location", "command": "edit_trail_forward" },
+	{
+		"caption": "Preferences: EditTrail Settings",
+		"command": "edit_settings",
+		"args": {
+			"base_file": "${packages}/EditTrail/EditTrail.sublime-settings",
+			"default": "// EditTrail user settings\n{\n\t$0\n}\n"
+		}
+	},
+	{
+		"caption": "Preferences: EditTrail Key Bindings",
+		"command": "edit_settings",
+		"args": {
+			"base_file": "${packages}/EditTrail/Default.sublime-keymap",
+			"user_file": "${packages}/User/Default (${platform}).sublime-keymap",
+			"default": "[\n\t$0\n]\n"
+		}
+	},
+]

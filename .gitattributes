@@ -1,0 +1,16 @@
+# Package Control installs from a GitHub archive of a release tag. GitHub builds those archives with
+# `git archive`, which leaves out paths marked export-ignore, so development files never reach users.
+# `just package-files` lists what a release would actually contain.
+.gitattributes  export-ignore
+.gitignore      export-ignore
+justfile        export-ignore
+pyproject.toml  export-ignore
+uv.lock         export-ignore
+tests/          export-ignore
+
+# Declare line-ending normalisation rather than inherit each developer's core.autocrlf.
+*               text=auto
+*.py            text
+*.md            text
+*.json          text
+*.sublime-*     text
