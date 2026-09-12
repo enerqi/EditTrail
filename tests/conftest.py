@@ -6,10 +6,13 @@ behaviour to exercise its logic:
 * A FakeBuffer holds text shared by every FakeView cloned from it.
 * Regions are stored per view as single points and shift on insertion, mimicking how Sublime moves
   regions when text is inserted before them.
+* FakeSelection is backed by the view, as Sublime's Selection is, so clear() really does leave the view
+  with no cursor and an sel()[0] on it raises IndexError. Code that focuses a view without placing a
+  cursor therefore fails a test instead of passing by accident.
 * FakeView.type() inserts text, moves the cursor, focuses the view, marks it dirty and fires the listener's
   on_modified, standing in for a keystroke. FakeView.external_change() fires on_modified the way a load,
-  restore or reload does: text changed, nothing unsaved. FakeView.close() fires on_pre_close first, as
-  Sublime does.
+  restore or reload does: text changed, nothing unsaved. FakeView.reload_from_disk() / revert() refill the
+  buffer and fire on_reload / on_revert. FakeView.close() fires on_pre_close first, as Sublime does.
 * FakeWindow.open_file() only records what was requested; tests create the reopened view and call
   on_load themselves, which is how Sublime sequences a real reopen.
 
@@ -28,7 +31,7 @@ import pytest
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-_ids = count(1)
+_ids: Iterator[int] = count(1)
 
 
 class FakeRegion:
@@ -66,13 +69,22 @@ class FakeBuffer:
         return [v for v in self._views if v.valid]
 
 
-class FakeSelection(list):
+class FakeSelection:
+    """Backed by the view, like Sublime's: clear() and add() mutate the view itself."""
+
     def __init__(self, view: FakeView) -> None:
-        super().__init__([FakeRegion(view.cursor)])
         self._view = view
 
+    def __len__(self) -> int:
+        return 0 if self._view.cursor is None else 1
+
+    def __getitem__(self, index: int) -> FakeRegion:
+        if self._view.cursor is None:
+            raise IndexError(index)
+        return FakeRegion(self._view.cursor)
+
     def clear(self) -> None:
-        pass
+        self._view.cursor = None
 
     def add(self, region: FakeRegion) -> None:
         self._view.cursor = region.b
@@ -87,6 +99,7 @@ class FakeView:
         buffer: FakeBuffer | None = None,
         *,
         scratch: bool = False,
+        widget: bool = False,
         element: str | None = None,
     ) -> None:
         self._id = next(_ids)
@@ -95,13 +108,14 @@ class FakeView:
         self.buf = buffer if buffer is not None else FakeBuffer(text)
         self.buf._views.append(self)
         self.regions: dict[str, int] = {}
-        self.cursor = 0
+        self._settings = FakeSettings({"is_widget": True} if widget else {})
+        self.cursor: int | None = 0
         self.valid = True
         self.scratch = scratch
         self._element = element
         self.dirty = False
         self.loading = False
-        window.views.append(self)
+        window._views.append(self)
 
     # Sublime API surface
     def id(self) -> int:
@@ -135,7 +149,7 @@ class FakeView:
         return self.buf
 
     def settings(self) -> FakeSettings:
-        return FakeSettings()
+        return self._settings
 
     def size(self) -> int:
         return len(self.buf.text)
@@ -194,13 +208,33 @@ class FakeView:
         _listener().on_modified(self)
         self.loading = False
 
+    def reload_from_disk(self, text: str, *, keep_regions: bool = True) -> None:
+        """Refill the buffer from disk, as a reload of a file changed outside Sublime does.
+
+        ``keep_regions=False`` models Sublime dropping the tracking regions when it
+        replaces the whole buffer.
+        """
+        self.buf.text = text
+        self.dirty = False
+        if not keep_regions:
+            self.regions.clear()
+        _listener().on_reload(self)
+
+    def revert(self, text: str, *, keep_regions: bool = True) -> None:
+        """Refill the buffer as File > Revert does."""
+        self.buf.text = text
+        self.dirty = False
+        if not keep_regions:
+            self.regions.clear()
+        _listener().on_revert(self)
+
     def type_at_row(self, row: int, text: str) -> None:
         self.type(self.text_point(row, 0), text)
 
     def close(self) -> None:
         _listener().on_pre_close(self)
         self.valid = False
-        self.win.views.remove(self)
+        self.win._views.remove(self)
 
     def cursor_row(self) -> int:
         return self.rowcol(self.cursor)[0]
@@ -209,12 +243,15 @@ class FakeView:
 class FakeWindow:
     def __init__(self) -> None:
         self._id = next(_ids)
-        self.views: list[FakeView] = []
+        self._views: list[FakeView] = []
         self.active: FakeView | None = None
         self.opened: list[str] = []
 
     def id(self) -> int:
         return self._id
+
+    def views(self) -> list[FakeView]:
+        return list(self._views)
 
     def active_view(self) -> FakeView | None:
         return self.active
@@ -226,7 +263,7 @@ class FakeWindow:
         pass
 
     def find_open_file(self, file_name: str) -> FakeView | None:
-        return next((v for v in self.views if v.fname == file_name), None)
+        return next((v for v in self._views if v.fname == file_name), None)
 
     def open_file(self, spec: str, flags: int = 0) -> None:
         self.opened.append(spec)
@@ -242,7 +279,7 @@ class _WindowCommand:
 
 
 status_messages: list[str] = []
-plugin_settings = FakeSettings()
+plugin_settings: FakeSettings = FakeSettings()
 
 _sublime = types.ModuleType("sublime")
 _sublime.Region = FakeRegion  # ty: ignore[unresolved-attribute]
@@ -258,7 +295,7 @@ sys.modules["sublime_plugin"] = _sublime_plugin
 
 import edit_trail  # noqa: E402 - must follow the fake module registration above
 
-_LISTENER = edit_trail.EditTrailListener()
+_LISTENER: edit_trail.EditTrailListener = edit_trail.EditTrailListener()
 
 
 def _listener() -> edit_trail.EditTrailListener:

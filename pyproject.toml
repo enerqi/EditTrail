@@ -103,4 +103,6 @@ unfixable = []
 # S311: (Standard pseudo-random generators are not suitable for cryptographic purposes)
 # ARG001/ARG002: unused args common for fixtures and fakes mirroring the Sublime API signatures
 # N802: fakes mirror Sublime API method names
-"tests/*" = ["S311", "ARG001", "ARG002", "ANN", "SLF001", "N802"]
+# SLF001: tests inspect the plugin's private state (_State, _Config, _navigate)
+# ANN is deliberately NOT ignored: tests and fakes are fully typed like the plugin.
+"tests/*" = ["S311", "ARG001", "ARG002", "SLF001", "N802"]
