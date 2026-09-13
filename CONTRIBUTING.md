@@ -84,6 +84,7 @@ reading in that order.
 | `st_tests/` | Tests that need the real editor, run by UnitTesting |
 | `unittesting.json` | Points UnitTesting at `st_tests`. Without it, it would load `tests/` and inject the fake `sublime` module into your running editor |
 | `edit_trail_selftest.py` | The one `TextCommand` `st_tests` needs, and nothing else. A TextCommand is the only way to get an `Edit` token, and it has to live in a top-level file |
+| `typings/` | Stubs for packages that are not on PyPI. Without `unittesting.pyi` the base class of `st_tests` resolves to Unknown, and an Unknown base stops ty checking those test bodies at all |
 | `justfile` | Every task. The comments explain the setup; read them rather than the recipes |
 | `EditTrail.sublime-project` | Dev project: folder excludes and debugger configurations |
 | `.gitattributes` | `export-ignore` is what keeps development files out of releases |
@@ -170,6 +171,13 @@ assumption that failed, check the matching bullet under "API contract relied on"
   annotations` makes modern annotations safe; runtime constructs are not covered by it, which is
   what the 3.8 test run is there to catch.
 - Run `just qa` before pushing. It is what CI runs, minus the type check.
+- **Two known gaps in the type checking**, both deliberate and both narrow. `invalid-argument-type`
+  is off for `tests/**`, because the fakes duck-type `sublime.View` and `sublime.Window` rather
+  than subclass them; that suppresses about fifty diagnostics, all of that one shape, and it also
+  means a genuine argument mismatch in test code goes unseen. And ty resolves some members of
+  Sublime's own `sublime.py` to Unknown (`sublime_api`, which it imports, is a C extension with no
+  stubs), so an expression that flows through one of those is unchecked wherever it appears.
+  Annotated parameters are unaffected, which is most of the plugin.
 
 ## Releasing
 

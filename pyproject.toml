@@ -30,6 +30,9 @@ pythonpath = ["."]  # import edit_trail.py from the repo root
 # (sublime.py, sublime_plugin.py) are not on PyPI; `just typecheck` passes Sublime's install Lib dir
 # with --extra-search-path.
 python-version = "3.8"
+# UnitTesting is a Sublime package, not a PyPI one, so st_tests' base class would resolve to Unknown
+# and silently stop its test bodies being checked at all. typings/ holds the stub that prevents that.
+extra-paths = ["typings"]
 
 [[tool.ty.overrides]]
 # Tests drive the plugin with lightweight fakes (tests/conftest.py) that duck-type sublime.View and
@@ -39,13 +42,6 @@ include = ["tests/**"]
 [tool.ty.overrides.rules]
 invalid-argument-type = "ignore"
 
-[[tool.ty.overrides]]
-# The in-editor tests import UnitTesting, which is a Sublime package rather than a PyPI one: it is
-# on sys.path inside the editor and nowhere on a dev machine.
-include = ["st_tests/**"]
-
-[tool.ty.overrides.rules]
-unresolved-import = "ignore"
 
 [tool.ruff]
 line-length = 120
