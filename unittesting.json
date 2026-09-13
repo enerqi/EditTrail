@@ -1,0 +1,7 @@
+{
+    "tests_dir": "st_tests",
+    "deferred": true,
+    "condition_timeout": 5000,
+    "capture_console": true,
+    "verbosity": 2
+}

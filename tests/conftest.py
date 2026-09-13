@@ -111,10 +111,10 @@ class FakeView:
         transient: bool = False,
     ) -> None:
         self._id = next(_ids)
-        self.win = window
-        self.fname = file_name
-        self.buf = buffer if buffer is not None else FakeBuffer(text)
-        self.buf._views.append(self)
+        self.owning_window = window
+        self.path = file_name
+        self.shared_buffer = buffer if buffer is not None else FakeBuffer(text)
+        self.shared_buffer._views.append(self)
         self.regions: dict[str, int] = {}
         self._settings = FakeSettings({"is_widget": True} if widget else {})
         self.cursor: int | None = 0
@@ -149,38 +149,38 @@ class FakeView:
         return self._element
 
     def window(self) -> FakeWindow | None:
-        return self.win if self.valid else None
+        return self.owning_window if self.valid else None
 
     def file_name(self) -> str | None:
-        return self.fname
+        return self.path
 
     def buffer(self) -> FakeBuffer:
-        return self.buf
+        return self.shared_buffer
 
     def buffer_id(self) -> int:
         """Shared by every view of one buffer, as Sublime's is: what makes a clone the same file."""
-        return self.buf.id()
+        return self.shared_buffer.id()
 
     def settings(self) -> FakeSettings:
         return self._settings
 
     def size(self) -> int:
-        return len(self.buf.text)
+        return len(self.shared_buffer.text)
 
     def sel(self) -> FakeSelection:
         return FakeSelection(self)
 
     def rowcol(self, point: int) -> tuple[int, int]:
-        before = self.buf.text[:point]
+        before = self.shared_buffer.text[:point]
         return before.count("\n"), point - (before.rfind("\n") + 1)
 
     def text_point(self, row: int, col: int) -> int:
-        lines = self.buf.text.split("\n")
+        lines = self.shared_buffer.text.split("\n")
         row = min(row, len(lines) - 1)
         return sum(len(line) + 1 for line in lines[:row]) + col
 
     def line(self, point: int) -> FakeRegion:
-        text = self.buf.text
+        text = self.shared_buffer.text
         start = text.rfind("\n", 0, point) + 1
         end = text.find("\n", point)
         return FakeRegion(start, len(text) if end < 0 else end)
@@ -199,8 +199,8 @@ class FakeView:
 
     # Test helpers
     def _insert(self, point: int, text: str) -> None:
-        self.buf.text = self.buf.text[:point] + text + self.buf.text[point:]
-        for view in self.buf.views():
+        self.shared_buffer.text = self.shared_buffer.text[:point] + text + self.shared_buffer.text[point:]
+        for view in self.shared_buffer.views():
             for key, region_point in view.regions.items():
                 if region_point >= point:
                     view.regions[key] = region_point + len(text)
@@ -210,7 +210,7 @@ class FakeView:
         self._insert(point, text)
         self.cursor = point + len(text)
         self.dirty = True
-        self.win.active = self
+        self.owning_window.active = self
         _listener().on_modified(self)
 
     def external_change(self, point: int, text: str, *, loading: bool = False) -> None:
@@ -227,7 +227,7 @@ class FakeView:
         ``keep_regions=False`` models Sublime dropping the tracking regions when it
         replaces the whole buffer.
         """
-        self.buf.text = text
+        self.shared_buffer.text = text
         self.dirty = False
         if not keep_regions:
             self.regions.clear()
@@ -235,7 +235,7 @@ class FakeView:
 
     def revert(self, text: str, *, keep_regions: bool = True) -> None:
         """Refill the buffer as File > Revert does."""
-        self.buf.text = text
+        self.shared_buffer.text = text
         self.dirty = False
         if not keep_regions:
             self.regions.clear()
@@ -247,7 +247,7 @@ class FakeView:
     def close(self) -> None:
         _listener().on_pre_close(self)
         self.valid = False
-        self.win._views.remove(self)
+        self.owning_window._views.remove(self)
 
     def cursor_row(self) -> int:
         return self.rowcol(self.cursor)[0]
@@ -258,7 +258,8 @@ class FakeWindow:
         self._id = next(_ids)
         self._views: list[FakeView] = []
         self.active: FakeView | None = None
-        self.opened: list[str] = []
+        self.reopen_requests: list[str] = []
+        """The ENCODED_POSITION specs the plugin asked open_file for, newest last."""
 
     def id(self) -> int:
         return self._id
@@ -277,10 +278,10 @@ class FakeWindow:
         pass
 
     def find_open_file(self, file_name: str) -> FakeView | None:
-        return next((v for v in self._views if v.fname == file_name), None)
+        return next((v for v in self._views if v.path == file_name), None)
 
     def open_file(self, spec: str, flags: int = 0) -> None:
-        self.opened.append(spec)
+        self.reopen_requests.append(spec)
 
 
 class _EventListener:
@@ -294,13 +295,13 @@ class _WindowCommand:
 
 status_messages: list[str] = []
 plugin_settings: FakeSettings = FakeSettings()
-timeouts: list[Callable[[], None]] = []
+pending_timeouts: list[Callable[[], None]] = []
 
 
 def run_timeouts() -> None:
     """Run everything queued with sublime.set_timeout, as the editor does when it goes idle."""
-    while timeouts:
-        timeouts.pop(0)()
+    while pending_timeouts:
+        pending_timeouts.pop(0)()
 
 
 _sublime = types.ModuleType("sublime")
@@ -309,7 +310,7 @@ _sublime.HIDDEN = 256  # ty: ignore[unresolved-attribute]
 _sublime.ENCODED_POSITION = 1  # ty: ignore[unresolved-attribute]
 _sublime.status_message = status_messages.append  # ty: ignore[unresolved-attribute]
 _sublime.load_settings = lambda _name: plugin_settings  # ty: ignore[unresolved-attribute]
-_sublime.set_timeout = lambda callback, _delay=0: timeouts.append(callback)  # ty: ignore[unresolved-attribute]
+_sublime.set_timeout = lambda callback, _delay=0: pending_timeouts.append(callback)  # ty: ignore[unresolved-attribute]
 _sublime_plugin = types.ModuleType("sublime_plugin")
 _sublime_plugin.EventListener = _EventListener  # ty: ignore[unresolved-attribute]
 _sublime_plugin.WindowCommand = _WindowCommand  # ty: ignore[unresolved-attribute]
@@ -331,7 +332,7 @@ def fresh_plugin() -> Iterator[None]:
     plugin_settings.values.clear()
     plugin_settings.callbacks.clear()
     status_messages.clear()
-    timeouts.clear()
+    pending_timeouts.clear()
     edit_trail.plugin_loaded()
     yield
     edit_trail.plugin_unloaded()
@@ -347,4 +348,4 @@ def window() -> FakeWindow:
     return FakeWindow()
 
 
-BODY = "\n".join(f"line{i}" for i in range(100))
+HUNDRED_LINE_TEXT = "\n".join(f"line{i}" for i in range(100))

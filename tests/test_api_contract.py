@@ -13,8 +13,8 @@ here as a literal. Regenerate with, against a Sublime install::
     blk=src[src.index('all_callbacks = {'):]; print(sorted(set(re.findall(r\"'(on_[a-z_0-9]+)'\",
     blk[:blk.index(chr(10)+'}')]))))" "<Sublime>/Lib/python314/sublime_plugin.py"
 
-Behaviour the API promises at runtime, rather than names, is checked by ``edit_trail_selftest``,
-which runs inside the editor.
+Behaviour the API promises at runtime, rather than names, is checked by ``st_tests/``, which runs
+inside the editor.
 """
 
 from __future__ import annotations

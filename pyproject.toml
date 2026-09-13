@@ -15,6 +15,7 @@ dependencies = []
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.130",  # stateful property tests (tests/test_properties.py); needs >= 3.10, so not on the 3.8 run
     "pytest>=9",
     "ruff>=0.15",
     "ty>=0.0.31",  # beta
@@ -37,6 +38,14 @@ include = ["tests/**"]
 
 [tool.ty.overrides.rules]
 invalid-argument-type = "ignore"
+
+[[tool.ty.overrides]]
+# The in-editor tests import UnitTesting, which is a Sublime package rather than a PyPI one: it is
+# on sys.path inside the editor and nowhere on a dev machine.
+include = ["st_tests/**"]
+
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"
 
 [tool.ruff]
 line-length = 120
@@ -106,3 +115,5 @@ unfixable = []
 # SLF001: tests inspect the plugin's private state (_State, _Config, _navigate)
 # ANN is deliberately NOT ignored: tests and fakes are fully typed like the plugin.
 "tests/*" = ["S311", "ARG001", "ARG002", "SLF001", "N802"]
+# PT009/PT027: the in-editor tests are unittest TestCases, because that is what UnitTesting runs.
+"st_tests/*" = ["PT009", "PT027"]

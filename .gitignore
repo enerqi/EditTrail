@@ -1,8 +1,10 @@
 .venv/
 __pycache__/
+.codegraph/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+.hypothesis/
 package-metadata.json
 # Per-user Sublime state (open files, layout, history) for EditTrail.sublime-project.
 *.sublime-workspace

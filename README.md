@@ -41,15 +41,21 @@ just install-dev   # link this checkout into Sublime's Packages dir
 just qa            # lint, format check, type check, tests on Python 3.14 and 3.8
 ```
 
-The tests run against a fake Sublime API, so they cannot catch the editor changing behaviour the
-plugin assumes (regions moving with the text, what a revert does to them). `edit_trail_selftest.py`
-checks those assumptions in the editor itself. It is a development file, kept out of released
-packages, and has no palette entry; run it from the console (View > Show Console) after a Sublime
-upgrade:
+`just test` runs two kinds of test against the fake Sublime API in `tests/conftest.py`: examples
+(`tests/test_edit_trail.py`), which name a situation and assert what should happen in it, and
+stateful property tests (`tests/test_properties.py`), which drive the same fake with command
+sequences [Hypothesis](https://hypothesis.readthedocs.io/en/latest/stateful.html) chooses and check
+the invariants that must hold whatever the order. Hypothesis needs a newer Python than the plugin's
+3.8 floor, so the 3.8 run skips that module.
 
-```python
-window.run_command("edit_trail_selftest")
-```
+Neither can catch the editor changing behaviour the plugin assumes (regions moving with the text,
+what a revert does to them): the fake would keep answering the old way. `st_tests/` checks those
+assumptions in the editor itself, under
+[UnitTesting](https://github.com/SublimeText/UnitTesting), which
+`.github/workflows/tests.yml` runs on every push against real Sublime builds on Linux, macOS and
+Windows. To run them locally, install UnitTesting, `just install-dev`, then pick
+`UnitTesting: Test Current Package` from the command palette. They are development files, kept out
+of released packages.
 
 Run `just` to see all recipes. The justfile comments explain the setup, including why `UV_PYTHON` is
 exported.

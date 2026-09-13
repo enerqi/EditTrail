@@ -95,7 +95,7 @@ history, and navigation only ever focuses views in the window the command ran
 in. The cases that could otherwise leak between windows are handled explicitly:
 
 * A tab dragged to another window after its edit: the entry is dropped from
-  the old window's history when navigation reaches it (:func:`_go`).
+  the old window's history when navigation reaches it (:func:`_show_entry`).
 * A closed file reopened in a different window: only the history of the window
   it opened in re-attaches (:meth:`EditTrailListener.on_load`).
 * An unsaved buffer with clones in several windows: entries only move to a
@@ -122,26 +122,32 @@ Performance
 -----------
 * ``on_modified`` runs synchronously on every keystroke, so it is kept to a
   handful of cheap API calls: ``is_scratch``, ``window``, ``is_loading``,
-  ``is_dirty``, ``active_view``, the primary selection (``View.sel()`` and
-  then indexing it, which is two round trips, not three: it is indexed
-  directly rather than ``len`` first), then ``get_regions`` for the newest
-  entry. Eight, and that is the whole cost of typing on once Sublime has
-  shifted that entry's region onto the cursor. When the region does have to
-  move, two ``rowcol`` and one ``add_regions`` follow: eleven. The panel/widget
-  check is cached per view, the modified view is known to be valid so no
+  ``is_dirty``, ``active_view``, the primary selection (one round trip:
+  ``View.sel()`` itself is a plain attribute read that hands back the
+  Selection bound to the view, and it is indexed directly rather than ``len``
+  first, which would be two), then ``get_regions`` for the newest entry.
+  Seven, and that is the whole cost of typing on once Sublime has shifted that
+  entry's region onto the cursor. When the region does have to move, two
+  ``rowcol`` and one ``add_regions`` follow: ten. The panel/widget check is
+  cached per view, the modified view is known to be valid so no
   ``is_valid`` is needed, and neither ``View.file_name`` nor the settings API
   is touched. The work does not grow with file size or history length.
-* Three round trips are made off that per-keystroke path. ``View.file_name``
-  and ``View.buffer_id`` when a new entry is created (:class:`Entry`), which
-  happens when the location is new rather than on every key. And one
+* Five round trips are made off that per-keystroke path. Four of them create a
+  new entry (:class:`Entry`): ``View.file_name``, ``View.buffer_id``,
+  ``View.rowcol`` and the ``View.add_regions`` that places the tracking region.
+  That happens when the location is new rather than on every key. And one
   ``set_timeout`` to schedule :func:`_refresh_anchors`, at most once every
   ``ANCHOR_REFRESH_DELAY_MS`` however fast the keys come.
 * Typing in a second view of a file the newest entry is already in (a split
-  pane, ``File > New View into File``) costs a ``buffer_id`` beyond the eight
-  above, then ``is_valid``, ``get_regions``, ``erase_regions`` and
-  ``add_regions`` to move the entry into that view: thirteen, and only for the
-  first such keystroke. The entry is then in the view being typed in, so the
-  ones after it take the same-view path (:meth:`Entry._merge_from_clone`).
+  pane, ``File > New View into File``) never reaches the ``get_regions`` in
+  the seventh slot above. It pays a ``buffer_id`` to tell that view from
+  another file's, then ``is_valid`` and ``get_regions`` on the view the entry
+  is in, ``erase_regions`` and ``add_regions`` to move it into the view being
+  typed in: eleven, or thirteen when the shared text has not already shifted
+  the region onto the cursor and the two ``rowcol`` of the distance check run
+  as well. Only for the first such keystroke: the entry is then in the view
+  being typed in, so the ones after it take the same-view path
+  (:meth:`Entry._merge_from_clone`).
 * :func:`_refresh_anchors` itself is throttled, not debounced: it runs
   ``ANCHOR_REFRESH_DELAY_MS`` after the first keystroke it was scheduled by,
   whether or not typing has stopped. Deliberate: a true debounce would keep
@@ -197,7 +203,7 @@ commented at the code that avoids it.
   on load tests :meth:`Entry.live_view` instead
   (:meth:`EditTrailListener.on_load`).
 * Sweeping the whole history for dead entries on every navigation keypress:
-  they are dropped lazily by :func:`_go` instead (:func:`_navigate`).
+  they are dropped lazily by :func:`_show_entry` instead (:func:`_navigate`).
 * Leaving entries anchored in a buffer that was reverted or reloaded from
   disk (:func:`_reanchor`).
 * Leaking the per-view kind cache when a window closes without closing each
@@ -242,8 +248,8 @@ behaviour: nothing in them says a region moves with the text, or what a revert
 does to one. These are the behaviours this plugin is built on. A type checker
 cannot hold Sublime to them, and neither can the unit tests, which answer with
 a fake (``tests/conftest.py``) that would keep answering the old way if a
-release changed one. ``edit_trail_selftest`` checks them inside the editor; run
-it after a Sublime upgrade.
+release changed one. ``st_tests/`` checks them inside the editor, on every
+push and on demand from the command palette.
 
 * Regions shift as text is inserted or deleted before them, and are left alone
   by edits after them. The whole tracking scheme rests on this, and
@@ -348,7 +354,7 @@ class _State:
 
     Attributes:
         histories: Window id to that window's History.
-        trackable: Ids of the views known to be ordinary editor views, the
+        trackable_view_ids: Ids of the views known to be ordinary editor views, the
             cached panel/widget half of _is_trackable. Whether a view is a
             panel or an input widget is settled when it is created and costs
             two API round trips to check, so it is computed once. Only the
@@ -359,7 +365,7 @@ class _State:
             no more than one timer is armed at a time however fast the keys
             come. Cleared by the run, not by the typing stopping, which is what
             makes the scheduling a throttle rather than a debounce.
-        refresh_modified: View id to view, for every trackable view modified
+        views_modified_since_refresh: View id to view, for every trackable view modified
             since the last _refresh_anchors run. Only entries on those views'
             buffers can have had their regions shifted, so the run refreshes
             those and leaves the rest of the history alone. Recording a view
@@ -373,9 +379,9 @@ class _State:
     """
 
     histories: ClassVar[dict[int, History]] = {}
-    trackable: ClassVar[set[int]] = set()
+    trackable_view_ids: ClassVar[set[int]] = set()
     refresh_pending: ClassVar[bool] = False
-    refresh_modified: ClassVar[dict[int, sublime.View]] = {}
+    views_modified_since_refresh: ClassVar[dict[int, sublime.View]] = {}
     key_counter: ClassVar[int] = 0
     region_prefix: ClassVar[str] = "edit_trail_"
 
@@ -706,7 +712,7 @@ def _is_trackable(view: sublime.View) -> bool:
     terminals, build and "Find Results" style output, and plugin previews that
     are written programmatically.
 
-    Only the panel/widget half is cached, in ``_State.trackable``, and only for
+    Only the panel/widget half is cached, in ``_State.trackable_view_ids``, and only for
     the views that pass it: that is settled when the view is created. Panels,
     the console and input widgets fire ``on_modified`` too (every keystroke in
     the find panel does), and Sublime sends no reliable close hook for them,
@@ -722,11 +728,11 @@ def _is_trackable(view: sublime.View) -> bool:
     round trip, and only for views that got past the cached half.
     """
     view_id = view.id()
-    if view_id in _State.trackable:
+    if view_id in _State.trackable_view_ids:
         return not view.is_scratch()
     if view.element() is not None or view.settings().get("is_widget"):
         return False
-    _State.trackable.add(view_id)
+    _State.trackable_view_ids.add(view_id)
     return not view.is_scratch()
 
 
@@ -805,7 +811,7 @@ def _refresh_anchors() -> None:
     around it changes, but its row/column is only written when it is created or
     detached. Anything that loses the region in between, a revert or reload
     refilling the buffer (:func:`_reanchor`) or another plugin erasing regions
-    (:func:`_go`), would otherwise re-anchor the entry wherever it was first
+    (:func:`_show_entry`), would otherwise re-anchor the entry wherever it was first
     typed: silently, and possibly hundreds of lines out.
 
     Doing it per keystroke would cost round trips proportional to the history,
@@ -822,7 +828,7 @@ def _refresh_anchors() -> None:
     Only entries whose region can have moved are refreshed. Sublime shifts a
     region when the text before it changes, so that is exactly the entries
     attached to a view of a buffer modified since the last run: the views in
-    ``_State.refresh_modified`` and their clones, which share the same text.
+    ``_State.views_modified_since_refresh`` and their clones, which share the same text.
     Everything else, every other file and every other window, is rejected on a
     view id, which is a Python attribute and not a round trip. So the cost is
     two round trips per modified buffer (almost always one) plus three per
@@ -838,8 +844,8 @@ def _refresh_anchors() -> None:
     navigates, so the history still needs no locks.
     """
     _State.refresh_pending = False
-    modified = _State.refresh_modified
-    _State.refresh_modified = {}
+    modified = _State.views_modified_since_refresh
+    _State.views_modified_since_refresh = {}
 
     sweep_all = False
     views_on_modified_buffers: set[int] = set()
@@ -891,7 +897,7 @@ def _reanchor(view: sublime.View) -> None:
                 entry.reanchor(entry_view)
 
 
-def _go(window: sublime.Window, history: History, entry: Entry) -> bool:
+def _show_entry(window: sublime.Window, history: History, entry: Entry) -> bool:
     """Show ``entry``: focus its view and place the cursor, or reopen its file.
 
     Navigation never leaves ``window``: an entry whose view has since moved to
@@ -924,8 +930,9 @@ def _go(window: sublime.Window, history: History, entry: Entry) -> bool:
         if regions:
             point = regions[0].b
             window.focus_view(view)
-            # One View.sel() round trip, not two: the Selection is bound to the
-            # view, so clearing and adding go through the same object.
+            # Two round trips, the clear and the add. View.sel() is not one:
+            # it hands back the Selection bound to the view without calling
+            # into Sublime, so the local is for readability, not for cost.
             selection = view.sel()
             selection.clear()
             selection.add(sublime.Region(point))
@@ -958,7 +965,7 @@ def _navigate(window: sublime.Window, step: Step) -> None:
     outcome in the status bar.
     """
     # No sweep for entries that can no longer be shown: that would cost an
-    # is_valid round trip per attached entry on every keypress. _go already
+    # is_valid round trip per attached entry on every keypress. _show_entry already
     # drops an entry it cannot show, and navigation carries on in the same
     # direction, so a sweep only did the same work eagerly.
     history = _State.histories.get(window.id())
@@ -975,7 +982,7 @@ def _navigate(window: sublime.Window, step: Step) -> None:
         if _near_cursor(cursor, entry):
             target += step
             continue
-        if _go(window, history, entry):
+        if _show_entry(window, history, entry):
             history.index = target
             sublime.status_message(f"EditTrail: edit location {target + 1}/{len(history.entries)}")
             return
@@ -1013,7 +1020,7 @@ class EditTrailListener(sublime_plugin.EventListener):
         # in this view. A dictionary store, no API call: View.id() is a Python
         # attribute, and it is the view rather than its buffer that is kept
         # here precisely so the hot path never reads View.buffer().
-        _State.refresh_modified[view.id()] = view
+        _State.views_modified_since_refresh[view.id()] = view
         if not _State.refresh_pending:
             # Throttled: the first keystroke after a run arms the timer and
             # the rest of that window cost no API call at all. Deliberately not
@@ -1032,8 +1039,9 @@ class EditTrailListener(sublime_plugin.EventListener):
             _debug("ignored change in a background view", view)
             return
         try:
-            # Two round trips, View.sel() then indexing it: indexing an empty
-            # Selection raises IndexError, whereas len() first would be three.
+            # One round trip, the indexing. View.sel() is a plain attribute
+            # read, and indexing an empty Selection raises IndexError, whereas
+            # len() first would be two.
             point = view.sel()[0].b
         except IndexError:
             return
@@ -1045,7 +1053,7 @@ class EditTrailListener(sublime_plugin.EventListener):
     def on_pre_close(self, view: sublime.View) -> None:
         """Detach entries from a closing view, or hand them to a clone."""
         view_id = view.id()
-        _State.trackable.discard(view_id)
+        _State.trackable_view_ids.discard(view_id)
         # One lookup per window that turns out to have entries in this view,
         # because the answer differs per window (see _other_view_of_buffer).
         # Almost always just the one: the window the view is in.
@@ -1120,7 +1128,7 @@ class EditTrailListener(sublime_plugin.EventListener):
 
         Sublime does not reliably send ``on_pre_close`` for every tab when a
         whole window goes, so the cached trackable flags are dropped here too.
-        Otherwise ``_State.trackable`` would keep one entry per view for the
+        Otherwise ``_State.trackable_view_ids`` would keep one entry per view for the
         rest of the session: small, but unbounded, which the memory note in the
         module docstring promises it is not.
 
@@ -1129,7 +1137,7 @@ class EditTrailListener(sublime_plugin.EventListener):
         got cached like any other.
         """
         for view in window.views(include_transient=True):
-            _State.trackable.discard(view.id())
+            _State.trackable_view_ids.discard(view.id())
         history = _State.histories.pop(window.id(), None)
         if history is not None:
             history.clear()
@@ -1208,8 +1216,8 @@ def plugin_unloaded() -> None:
     for history in _State.histories.values():
         history.clear()
     _State.histories.clear()
-    _State.trackable.clear()
+    _State.trackable_view_ids.clear()
     # A refresh already scheduled still fires, harmlessly, over empty histories.
     _State.refresh_pending = False
-    _State.refresh_modified.clear()
+    _State.views_modified_since_refresh.clear()
     sublime.load_settings(SETTINGS_FILE).clear_on_change("edit_trail")
