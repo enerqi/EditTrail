@@ -296,6 +296,9 @@ release. The newest APIs used are ``View.buffer`` and
 ``Window.views(include_transient=...)``, both build 4081; ``View.element`` and
 the ``on_reload`` / ``on_revert`` listener hooks arrived in 4050, and
 ``View.buffer_id`` predates Sublime Text 4 entirely. Builds before 4107 were dev-channel only.
+The API reference is at
+https://www.sublimetext.com/docs/api_reference.html.
+
 ``.python-version`` selects the modern plugin host, which is a real Python 3.8
 on stable builds before 4205, so this module must run on 3.8. It is fully
 typed all the same: annotations are postponed with

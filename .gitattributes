@@ -6,6 +6,7 @@
 justfile        export-ignore
 pyproject.toml  export-ignore
 uv.lock         export-ignore
+CONTRIBUTING.md export-ignore
 tests/          export-ignore
 st_tests/       export-ignore
 unittesting.json    export-ignore
